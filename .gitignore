@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+release/
+
+# Credentials & local config (never commit secrets)
+.env
+*.local
+*.local.json
+
+# Logs & OS cruft
+*.log
+.DS_Store
+Thumbs.db
+
+# Editor / AI / dev tooling (not part of the app)
+.claude/
+.agents/
+.codegraph/
+.mcp.json
+skills-lock.json
+CLAUDE.md

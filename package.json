@@ -1,0 +1,41 @@
+{
+  "name": "decagon",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Decagon — desktop app for managing Codeforces Polygon problems via the Polygon API.",
+  "main": "out/main/index.js",
+  "author": "",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "package": "electron-vite build && electron-builder",
+    "selftest": "tsx src/core/sign.selftest.ts",
+    "cli": "tsx src/test-cli.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  },
+  "build": {
+    "appId": "com.example.decagon",
+    "productName": "Decagon",
+    "files": ["out/**/*"],
+    "directories": { "output": "release" },
+    "win": { "target": "nsis" },
+    "mac": { "target": "dmg" },
+    "linux": { "target": "AppImage" }
+  }
+}

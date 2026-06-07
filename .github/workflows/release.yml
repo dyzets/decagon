@@ -1,0 +1,42 @@
+name: Release
+
+# Builds installers for Windows, macOS and Linux and attaches them to a GitHub
+# Release whenever you push a version tag (e.g. v0.1.0). electron-builder publishes
+# the artifacts to a *draft* release of the same version, which you then publish.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Needed so the built-in GITHUB_TOKEN can create/update the release.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Bundle main + preload + renderer
+        run: npm run build
+
+      - name: Package & publish to the GitHub Release
+        run: npx --no-install electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Skip macOS code-signing (unsigned .dmg). Remove if you add signing certs.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
