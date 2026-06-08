@@ -20,6 +20,9 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # Fixed cache dir so @electron/get reuses the downloaded binary across runs.
+      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
     steps:
       - uses: actions/checkout@v4
 
@@ -28,8 +31,22 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Cache Electron binary
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/electron
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json') }}
+          restore-keys: ${{ runner.os }}-electron-
+
+      # `npm ci` downloads the Electron binary in a postinstall step; that download
+      # occasionally fails with a transient 504/timeout. Retry instead of failing the run.
       - name: Install dependencies
-        run: npm ci
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: npm ci
 
       - name: Bundle main + preload + renderer
         run: npm run build
