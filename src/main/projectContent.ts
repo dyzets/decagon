@@ -256,7 +256,10 @@ function readFiles(
       sourceType: meta?.sourceType,
       content: binary ? "" : buf.toString("utf8"),
       binary,
-      push: meta?.push ?? true,
+      // A file present on disk but absent from the manifest was created in the folder
+      // externally — default it to local-only (push off). A manifest entry missing the
+      // flag is a legacy project, kept as push-on for back-compat.
+      push: meta ? meta.push ?? true : false,
       // Advanced properties only apply to resource files.
       resourceAdvancedProperties:
         type === "resource" ? meta?.resourceAdvancedProperties : undefined,

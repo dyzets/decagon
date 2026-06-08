@@ -1229,14 +1229,25 @@ function SolutionsCard({
       `solution:${name}`,
     );
   }
+  // Metadata edits (tag, push, …) take effect immediately: apply the patch and write the
+  // unit to the folder right away (no Save button). Content is read-only here.
+  function patchAndSaveSolution(s: ProjectSolutionEntry, patch: Partial<ProjectSolutionEntry>): void {
+    const next = { ...s, ...patch };
+    setSolution(s.name, patch);
+    void save.saveUnit({
+      ref: { kind: "solution", name: s.name },
+      id: `solution:${s.name}`,
+      write: () => window.polygon.saveSolutionEntry(path, next),
+      applyLocal: (disk) => applyLocal(s.name, disk),
+      label: `solution ${s.name}`,
+    });
+  }
   function addSolution(name: string): void {
-    update(
-      (c) =>
-        c.solutions.some((s) => s.name === name)
-          ? c
-          : { ...c, solutions: [...c.solutions, { name, tag: "OK", content: "", push: true }] },
-      `solution:${name}`,
-    );
+    if (solutions.some((s) => s.name === name)) return;
+    const entry: ProjectSolutionEntry = { name, tag: "OK", content: "", push: false };
+    update((c) => ({ ...c, solutions: [...c.solutions, entry] }), `solution:${name}`);
+    // No Save button — scaffold the solution file in the folder right away.
+    patchAndSaveSolution(entry, {});
   }
   async function removeSolution(name: string): Promise<void> {
     if (!window.confirm(`Remove solution ${name} from the folder?`)) return;
@@ -1255,18 +1266,32 @@ function SolutionsCard({
   /** Turn a solution into a source/resource/aux file (it stays the same file in files/). */
   function changeSolutionCategory(s: ProjectSolutionEntry, cat: FileCategory): void {
     if (cat === "solution") return;
+    const file: ProjectFileEntry = {
+      name: s.name,
+      type: cat,
+      content: s.content,
+      binary: false,
+      sourceType: s.sourceType,
+      push: s.push,
+    };
     update((c) => ({
       ...c,
       solutions: c.solutions.filter((x) => x.name !== s.name),
-      files: c.files.some((f) => f.name === s.name)
-        ? c.files
-        : [
-            ...c.files,
-            { name: s.name, type: cat, content: s.content, binary: false, sourceType: s.sourceType, push: s.push },
-          ],
+      files: c.files.some((f) => f.name === s.name) ? c.files : [...c.files, file],
     }));
     save.clearDirty(`solution:${s.name}`);
-    save.markDirty(`file:${s.name}`);
+    // Reclassification is saved immediately (the file moves category in the manifest).
+    void save.saveUnit({
+      ref: { kind: "file", name: s.name },
+      id: `file:${s.name}`,
+      write: () => window.polygon.saveFileEntry(path, file),
+      applyLocal: (disk) =>
+        update((c) => ({
+          ...c,
+          files: c.files.map((f) => (f.name === s.name ? { ...f, content: disk.content } : f)),
+        })),
+      label: `file ${s.name}`,
+    });
   }
 
   return (
@@ -1294,9 +1319,6 @@ function SolutionsCard({
             <span className="badge" data-tag={s.tag}>
               {s.tag}
             </span>
-            {save.isDirty(`solution:${s.name}`) ? (
-              <span className="muted"> · unsaved</span>
-            ) : null}
             <span
           className="unit-actions"
           onClick={(e) => {
@@ -1308,22 +1330,8 @@ function SolutionsCard({
         >
               <PushToggle
                 push={s.push}
-                onChange={(v) => setSolution(s.name, { push: v })}
+                onChange={(v) => patchAndSaveSolution(s, { push: v })}
               />
-              <button
-                disabled={!save.isDirty(`solution:${s.name}`)}
-                onClick={() =>
-                  save.saveUnit({
-                    ref: { kind: "solution", name: s.name },
-                    id: `solution:${s.name}`,
-                    write: () => window.polygon.saveSolutionEntry(path, s),
-                    applyLocal: (disk) => applyLocal(s.name, disk),
-                    label: `solution ${s.name}`,
-                  })
-                }
-              >
-                {save.isDirty(`solution:${s.name}`) ? "Save" : "Saved"}
-              </button>
               <button className="link danger" onClick={() => removeSolution(s.name)}>
                 Remove
               </button>
@@ -1350,7 +1358,7 @@ function SolutionsCard({
               <select
                 value={s.tag}
                 onChange={(e) =>
-                  setSolution(s.name, { tag: e.target.value as SolutionTag })
+                  patchAndSaveSolution(s, { tag: e.target.value as SolutionTag })
                 }
               >
                 {SOLUTION_TAGS.map((t) => (
@@ -1361,12 +1369,7 @@ function SolutionsCard({
               </select>
             </label>
           </div>
-          <textarea
-            className="code"
-            rows={10}
-            value={s.content}
-            onChange={(e) => setSolution(s.name, { content: e.target.value })}
-          />
+          <textarea className="code" rows={10} value={s.content} readOnly />
         </details>
       ))}
       <AddRow
@@ -1400,14 +1403,26 @@ function FilesCard({
       `file:${name}`,
     );
   }
+  // Metadata edits (type, push, advanced props) take effect immediately: apply the patch
+  // and write the unit to the folder right away (no Save button). Content is read-only here.
+  function patchAndSaveFile(f: ProjectFileEntry, patch: Partial<ProjectFileEntry>): void {
+    const next = { ...f, ...patch };
+    setFile(f.name, patch);
+    void save.saveUnit({
+      ref: { kind: "file", name: f.name },
+      id: `file:${f.name}`,
+      write: () => window.polygon.saveFileEntry(path, next),
+      applyLocal: (disk) => setFile(f.name, { content: disk.content }),
+      label: `file ${f.name}`,
+    });
+  }
   function addFile(name: string, type: ProjectFileEntry["type"]): void {
-    update(
-      (c) =>
-        c.files.some((f) => f.name === name)
-          ? c
-          : { ...c, files: [...c.files, { name, type, content: "", binary: false, push: true }] },
-      `file:${name}`,
-    );
+    if (files.some((f) => f.name === name)) return;
+    const entry: ProjectFileEntry = { name, type, content: "", binary: false, push: false };
+    update((c) => ({ ...c, files: [...c.files, entry] }), `file:${name}`);
+    // No Save button — scaffold the file in the folder right away (content is edited
+    // externally and shown read-only here).
+    patchAndSaveFile(entry, {});
   }
   async function removeFile(name: string): Promise<void> {
     if (!window.confirm(`Remove file ${name} from the folder?`)) return;
@@ -1423,20 +1438,35 @@ function FilesCard({
   function changeFileCategory(f: ProjectFileEntry, cat: FileCategory): void {
     if (cat === f.type) return;
     if (cat === "solution") {
+      const sol: ProjectSolutionEntry = {
+        name: f.name,
+        tag: "OK",
+        content: f.content,
+        sourceType: f.sourceType,
+        push: f.push,
+      };
       update((c) => ({
         ...c,
         files: c.files.filter((x) => x.name !== f.name),
-        solutions: c.solutions.some((s) => s.name === f.name)
-          ? c.solutions
-          : [
-              ...c.solutions,
-              { name: f.name, tag: "OK", content: f.content, sourceType: f.sourceType, push: f.push },
-            ],
+        solutions: c.solutions.some((s) => s.name === f.name) ? c.solutions : [...c.solutions, sol],
       }));
       save.clearDirty(`file:${f.name}`);
-      save.markDirty(`solution:${f.name}`);
+      // Reclassification is saved immediately (the file becomes a solution in the manifest).
+      void save.saveUnit({
+        ref: { kind: "solution", name: f.name },
+        id: `solution:${f.name}`,
+        write: () => window.polygon.saveSolutionEntry(path, sol),
+        applyLocal: (disk) =>
+          update((c) => ({
+            ...c,
+            solutions: c.solutions.map((s) =>
+              s.name === f.name ? { ...s, content: disk.content } : s,
+            ),
+          })),
+        label: `solution ${f.name}`,
+      });
     } else {
-      setFile(f.name, { type: cat });
+      patchAndSaveFile(f, { type: cat });
     }
   }
 
@@ -1458,9 +1488,9 @@ function FilesCard({
             key={f.name}
             file={f}
             setFile={setFile}
+            patchSave={patchAndSaveFile}
             removeFile={removeFile}
             onCategory={changeFileCategory}
-            path={path}
             save={save}
           />
         ))}
@@ -1484,9 +1514,9 @@ function FilesCard({
             key={f.name}
             file={f}
             setFile={setFile}
+            patchSave={patchAndSaveFile}
             removeFile={removeFile}
             onCategory={changeFileCategory}
-            path={path}
             save={save}
             advanced
           />
@@ -1510,9 +1540,9 @@ function FilesCard({
             key={f.name}
             file={f}
             setFile={setFile}
+            patchSave={patchAndSaveFile}
             removeFile={removeFile}
             onCategory={changeFileCategory}
-            path={path}
             save={save}
           />
         ))}
@@ -1529,17 +1559,17 @@ function FilesCard({
 function FileEditor({
   file: f,
   setFile,
+  patchSave,
   removeFile,
   onCategory,
-  path,
   save,
   advanced,
 }: {
   file: ProjectFileEntry;
   setFile: (name: string, patch: Partial<ProjectFileEntry>) => void;
+  patchSave: (file: ProjectFileEntry, patch: Partial<ProjectFileEntry>) => void;
   removeFile: (name: string) => void;
   onCategory: (file: ProjectFileEntry, cat: FileCategory) => void;
-  path: string;
   save: SaveApi;
   advanced?: boolean;
 }): JSX.Element {
@@ -1566,7 +1596,6 @@ function FileEditor({
         <span className="muted"> · {CATEGORY_LABELS[f.type]}</span>
         {f.binary ? <span className="muted"> · binary</span> : null}
         {advSummary ? <span className="muted"> · {advSummary}</span> : null}
-        {save.isDirty(id) ? <span className="muted"> · unsaved</span> : null}
         <span
           className="unit-actions"
           onClick={(e) => {
@@ -1577,23 +1606,7 @@ function FileEditor({
           }}
         >
           {!f.binary && (
-            <>
-              <PushToggle push={f.push} onChange={(v) => setFile(f.name, { push: v })} />
-              <button
-                disabled={!save.isDirty(id)}
-                onClick={() =>
-                  save.saveUnit({
-                    ref,
-                    id,
-                    write: () => window.polygon.saveFileEntry(path, f),
-                    applyLocal,
-                    label: `file ${f.name}`,
-                  })
-                }
-              >
-                {save.isDirty(id) ? "Save" : "Saved"}
-              </button>
-            </>
+            <PushToggle push={f.push} onChange={(v) => patchSave(f, { push: v })} />
           )}
           <button className="link danger" onClick={() => removeFile(f.name)}>
             Remove
@@ -1618,17 +1631,12 @@ function FileEditor({
       {f.binary ? (
         <p className="muted">Binary file — content not editable here.</p>
       ) : (
-        <textarea
-          className="code"
-          rows={10}
-          value={f.content}
-          onChange={(e) => setFile(f.name, { content: e.target.value })}
-        />
+        <textarea className="code" rows={10} value={f.content} readOnly />
       )}
       {advanced && f.type === "resource" && (
         <AdvancedPropsEditor
           adv={f.resourceAdvancedProperties}
-          onChange={(adv) => setFile(f.name, { resourceAdvancedProperties: adv })}
+          onChange={(adv) => patchSave(f, { resourceAdvancedProperties: adv })}
         />
       )}
     </details>
