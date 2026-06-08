@@ -128,6 +128,11 @@ export function readProjectContent(dir: string): ProjectContent {
 
   const config = readConfig(dir);
 
+  // Solutions and source/resource files now share the flat `files/` folder so the whole
+  // problem lives in one place locally. The manifest's solutions[] list disambiguates
+  // which names are solutions; everything else in files/ is a source/resource file.
+  const solutionNames = new Set(manifest.solutions.map((s) => s.name));
+
   return {
     problemId: manifest.problemId,
     name: manifest.name,
@@ -138,11 +143,20 @@ export function readProjectContent(dir: string): ProjectContent {
     statements: readStatements(dir, manifest),
     statementResources: readStatementResources(dir),
     solutions: readSolutions(dir, manifest),
-    files: readFiles(dir, manifest),
+    files: readFiles(dir, manifest, solutionNames),
     testsets: readTestsets(dir, manifest, config),
     validatorTests: readJsonArray<ProjectValidatorTest>(join(dir, VALIDATOR_TESTS)),
     checkerTests: readJsonArray<ProjectCheckerTest>(join(dir, CHECKER_TESTS)),
   };
+}
+
+/** Path backing a solution: `files/<name>`, falling back to the legacy `solutions/` dir. */
+function solutionPath(dir: string, name: string): string | null {
+  const inFiles = join(dir, "files", name);
+  if (existsSync(inFiles)) return inFiles;
+  const legacy = join(dir, "solutions", name);
+  if (existsSync(legacy)) return legacy;
+  return null;
 }
 
 function readJsonArray<T>(path: string): T[] {
@@ -205,24 +219,33 @@ function readStatements(dir: string, manifest: SyncManifest): ProjectStatementEn
   return out.sort((a, b) => a.lang.localeCompare(b.lang));
 }
 
+// Solutions are listed authoritatively by the manifest (their files live in `files/`,
+// flat alongside source files); the manifest is what tells them apart.
 function readSolutions(dir: string, manifest: SyncManifest): ProjectSolutionEntry[] {
   const out: ProjectSolutionEntry[] = [];
-  for (const name of listFilesShallow(join(dir, "solutions"))) {
-    const buf = readFileSync(join(dir, "solutions", name));
-    const meta = manifest.solutions.find((s) => s.name === name);
+  for (const meta of manifest.solutions) {
+    const path = solutionPath(dir, meta.name);
+    if (!path) continue; // removed from disk
+    const buf = readFileSync(path);
     out.push({
-      name,
-      tag: meta?.tag ?? "OK",
-      sourceType: meta?.sourceType,
+      name: meta.name,
+      tag: meta.tag ?? "OK",
+      sourceType: meta.sourceType,
       content: isBinary(buf) ? "" : buf.toString("utf8"),
+      push: meta.push ?? true,
     });
   }
   return out;
 }
 
-function readFiles(dir: string, manifest: SyncManifest): ProjectFileEntry[] {
+function readFiles(
+  dir: string,
+  manifest: SyncManifest,
+  solutionNames: Set<string>,
+): ProjectFileEntry[] {
   const out: ProjectFileEntry[] = [];
   for (const name of listFilesShallow(join(dir, "files"))) {
+    if (solutionNames.has(name)) continue; // a solution, handled by readSolutions
     const buf = readFileSync(join(dir, "files", name));
     const binary = isBinary(buf);
     const meta = manifest.files.find((f) => f.name === name);
@@ -233,6 +256,7 @@ function readFiles(dir: string, manifest: SyncManifest): ProjectFileEntry[] {
       sourceType: meta?.sourceType,
       content: binary ? "" : buf.toString("utf8"),
       binary,
+      push: meta?.push ?? true,
       // Advanced properties only apply to resource files.
       resourceAdvancedProperties:
         type === "resource" ? meta?.resourceAdvancedProperties : undefined,
@@ -323,8 +347,7 @@ export function writeProjectContent(dir: string, content: ProjectContent): void 
   writeConfig(dir, content);
   writeStatements(dir, content.statements);
   writeStatementResources(dir, content.statementResources);
-  writeSolutions(dir, content.solutions);
-  writeFiles(dir, content.files);
+  writeFilesDir(dir, content.files, content.solutions);
   writeTestsets(dir, content.testsets);
   writeText(join(dir, VALIDATOR_TESTS), JSON.stringify(content.validatorTests, null, 2));
   writeText(join(dir, CHECKER_TESTS), JSON.stringify(content.checkerTests, null, 2));
@@ -339,6 +362,7 @@ export function writeProjectContent(dir: string, content: ProjectContent): void 
       name: f.name,
       type: f.type,
       sourceType: f.sourceType,
+      push: f.push,
       resourceAdvancedProperties:
         f.type === "resource" ? f.resourceAdvancedProperties : undefined,
     })),
@@ -346,6 +370,7 @@ export function writeProjectContent(dir: string, content: ProjectContent): void 
       name: s.name,
       tag: s.tag,
       sourceType: s.sourceType,
+      push: s.push,
     })),
     statements: content.statements.map((s) => ({
       lang: s.lang,
@@ -418,26 +443,30 @@ function writeStatements(dir: string, statements: ProjectStatementEntry[]): void
   }
 }
 
-function writeSolutions(dir: string, solutions: ProjectSolutionEntry[]): void {
-  const solDir = join(dir, "solutions");
-  const keep = new Set(solutions.map((s) => s.name));
-  for (const name of listFilesShallow(solDir)) {
-    if (!keep.has(name)) rmSync(join(solDir, name), { force: true });
-  }
-  for (const s of solutions) {
-    writeText(join(solDir, s.name), s.content);
-  }
-}
-
-function writeFiles(dir: string, files: ProjectFileEntry[]): void {
+/**
+ * Authoritative writer for the flat `files/` folder, which now holds both source/
+ * resource files and solution files. Names present in neither list are deleted; binary
+ * files are left untouched (their content isn't editable here).
+ */
+function writeFilesDir(
+  dir: string,
+  files: ProjectFileEntry[],
+  solutions: ProjectSolutionEntry[],
+): void {
   const filesDir = join(dir, "files");
-  const keep = new Set(files.map((f) => f.name));
+  const keep = new Set<string>([
+    ...files.map((f) => f.name),
+    ...solutions.map((s) => s.name),
+  ]);
   for (const name of listFilesShallow(filesDir)) {
     if (!keep.has(name)) rmSync(join(filesDir, name), { force: true });
   }
   for (const f of files) {
     if (f.binary) continue; // leave binary files untouched
     writeText(join(filesDir, f.name), f.content);
+  }
+  for (const s of solutions) {
+    writeText(join(filesDir, s.name), s.content);
   }
 }
 
@@ -472,7 +501,8 @@ function unitPaths(dir: string, ref: ProjectFileRef): string[] {
     case "file":
       return [join(dir, "files", ref.name)];
     case "solution":
-      return [join(dir, "solutions", ref.name)];
+      // Solutions live in files/ now; include the legacy path so delete cleans both.
+      return [join(dir, "files", ref.name), join(dir, "solutions", ref.name)];
     case "statementResource":
       return [join(dir, ...RESOURCES_SUBDIR, ref.name)];
     case "script":
@@ -502,7 +532,11 @@ export function readProjectUnit(dir: string, ref: ProjectFileRef): ProjectUnitSn
     )?.encoding;
     return { exists, binary: false, content: "", fields, encoding };
   }
-  const path = unitPaths(dir, ref)[0]!;
+  // Solutions may still sit in the legacy solutions/ dir until first re-saved.
+  const path =
+    ref.kind === "solution"
+      ? solutionPath(dir, ref.name) ?? join(dir, "files", ref.name)
+      : unitPaths(dir, ref)[0]!;
   if (!existsSync(path)) return { exists: false, binary: false, content: "" };
   const buf = readFileSync(path);
   const binary = isBinary(buf);
@@ -519,12 +553,15 @@ function updateManifest(dir: string, fn: (m: SyncManifest) => void): void {
 export function writeFileEntry(dir: string, entry: ProjectFileEntry): void {
   if (!entry.binary) writeText(join(dir, "files", entry.name), entry.content);
   updateManifest(dir, (m) => {
+    // files/ and solutions[] share a namespace — a name is one or the other.
+    m.solutions = m.solutions.filter((s) => s.name !== entry.name);
     m.files = [
       ...m.files.filter((f) => f.name !== entry.name),
       {
         name: entry.name,
         type: entry.type,
         sourceType: entry.sourceType,
+        push: entry.push,
         resourceAdvancedProperties:
           entry.type === "resource" ? entry.resourceAdvancedProperties : undefined,
       },
@@ -533,11 +570,13 @@ export function writeFileEntry(dir: string, entry: ProjectFileEntry): void {
 }
 
 export function writeSolutionEntry(dir: string, entry: ProjectSolutionEntry): void {
-  writeText(join(dir, "solutions", entry.name), entry.content);
+  writeText(join(dir, "files", entry.name), entry.content);
   updateManifest(dir, (m) => {
+    // files/ and solutions[] share a namespace — a name is one or the other.
+    m.files = m.files.filter((f) => f.name !== entry.name);
     m.solutions = [
       ...m.solutions.filter((s) => s.name !== entry.name),
-      { name: entry.name, tag: entry.tag, sourceType: entry.sourceType },
+      { name: entry.name, tag: entry.tag, sourceType: entry.sourceType, push: entry.push },
     ];
   });
 }

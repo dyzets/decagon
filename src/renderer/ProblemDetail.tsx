@@ -26,6 +26,7 @@ import type {
   ProjectValidatorTest,
   SyncSummary,
 } from "../shared/ipc";
+import { NotificationsPanel, StatusSidebar } from "./StatusSidebar";
 import { useToast } from "./Toast";
 
 function describeSync(s: SyncSummary): string {
@@ -39,7 +40,6 @@ function describeSync(s: SyncSummary): string {
 type TabId =
   | "info"
   | "statements"
-  | "solutions"
   | "files"
   | "tests"
   | "validator"
@@ -51,7 +51,6 @@ type TabId =
 const TABS: { id: TabId; label: string }[] = [
   { id: "info", label: "Info" },
   { id: "statements", label: "Statements" },
-  { id: "solutions", label: "Solutions" },
   { id: "files", label: "Files" },
   { id: "tests", label: "Tests" },
   { id: "validator", label: "Validator tests" },
@@ -98,7 +97,19 @@ const SOLUTION_TAG_LABELS: Record<SolutionTag, string> = {
   RE: "Runtime error",
 };
 
-const FILE_TYPES: ProjectFileEntry["type"][] = ["source", "resource", "aux"];
+/**
+ * UI categories for a unit in the Files tab. "solution" is stored as a solution entry
+ * (with a tag); "source"/"resource"/"aux" are Polygon file types. Picking a different
+ * category in a unit's Type dropdown moves it between the sections.
+ */
+type FileCategory = "solution" | "source" | "resource" | "aux";
+const FILE_CATEGORIES: FileCategory[] = ["solution", "source", "resource", "aux"];
+const CATEGORY_LABELS: Record<FileCategory, string> = {
+  solution: "Solution",
+  source: "Source",
+  resource: "Resource",
+  aux: "Attachment",
+};
 
 // Resource advanced properties (graders) — Polygon supports only cpp.* and python.*.
 const RESOURCE_LANG_GROUPS = ["cpp.*", "python.*"];
@@ -272,6 +283,8 @@ export function ProblemDetail({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<TabId>("info");
+  // Bumped after each load/pull/push so the status sidebar re-fetches live metadata.
+  const [statusRefresh, setStatusRefresh] = useState(0);
   const [conflict, setConflict] = useState<{
     ref: ProjectFileRef;
     disk: ProjectUnitSnapshot;
@@ -286,6 +299,7 @@ export function ProblemDetail({
       setContent(c);
       setBaselines(buildBaselines(c));
       setDirty(new Set());
+      setStatusRefresh((n) => n + 1);
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       setError(m);
@@ -453,7 +467,8 @@ export function ProblemDetail({
   const pid = content?.problemId ?? problemId;
 
   return (
-    <div>
+    <div className="detail-layout">
+      <div className="detail-main">
       <div className="row">
         <button className="link" onClick={onBack}>
           ← Back
@@ -546,16 +561,16 @@ export function ProblemDetail({
             />
           </>
         )}
-        {content && tab === "solutions" && (
-          <SolutionsCard
-            solutions={content.solutions}
-            update={update}
-            path={path}
-            save={saveApi}
-          />
-        )}
         {content && tab === "files" && (
-          <FilesCard files={content.files} update={update} path={path} save={saveApi} />
+          <>
+            <SolutionsCard
+              solutions={content.solutions}
+              update={update}
+              path={path}
+              save={saveApi}
+            />
+            <FilesCard files={content.files} update={update} path={path} save={saveApi} />
+          </>
         )}
         {content && tab === "tests" && (
           <TestsCard
@@ -588,6 +603,17 @@ export function ProblemDetail({
         {tab === "commit" && (pid ? <CommitCard problemId={pid} /> : <UnboundNotice />)}
         {tab === "access" && (pid ? <AccessCard problemId={pid} /> : <UnboundNotice />)}
       </div>
+      </div>
+
+      <aside className="detail-side">
+        <StatusSidebar
+          content={content}
+          problemId={pid}
+          problemName={problemName}
+          refreshKey={statusRefresh}
+        />
+        <NotificationsPanel />
+      </aside>
 
       {conflict && (
         <ConflictDialog
@@ -884,6 +910,40 @@ function AddRow({
   );
 }
 
+/**
+ * Per-file checkbox controlling whether the file is uploaded on "Push to Polygon".
+ * Sits in the file's summary row (operable without expanding); when off, the file stays
+ * local-only. The checkbox is a real form control, so clicking it doesn't toggle the
+ * surrounding <details> (Chromium ignores form-control clicks); the text is made inert so
+ * clicking the words doesn't expand the file either.
+ */
+function PushToggle({
+  push,
+  onChange,
+}: {
+  push: boolean;
+  onChange: (v: boolean) => void;
+}): JSX.Element {
+  return (
+    <label className="inline" title="Include this file when pushing to Polygon">
+      <input
+        type="checkbox"
+        checked={push}
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+      >
+        Push to Polygon
+      </span>
+    </label>
+  );
+}
+
 // ---- Info + checker/validator/interactor ----
 
 function InfoCard({
@@ -1174,7 +1234,7 @@ function SolutionsCard({
       (c) =>
         c.solutions.some((s) => s.name === name)
           ? c
-          : { ...c, solutions: [...c.solutions, { name, tag: "OK", content: "" }] },
+          : { ...c, solutions: [...c.solutions, { name, tag: "OK", content: "", push: true }] },
       `solution:${name}`,
     );
   }
@@ -1192,10 +1252,30 @@ function SolutionsCard({
       ),
     }));
   }
+  /** Turn a solution into a source/resource/aux file (it stays the same file in files/). */
+  function changeSolutionCategory(s: ProjectSolutionEntry, cat: FileCategory): void {
+    if (cat === "solution") return;
+    update((c) => ({
+      ...c,
+      solutions: c.solutions.filter((x) => x.name !== s.name),
+      files: c.files.some((f) => f.name === s.name)
+        ? c.files
+        : [
+            ...c.files,
+            { name: s.name, type: cat, content: s.content, binary: false, sourceType: s.sourceType, push: s.push },
+          ],
+    }));
+    save.clearDirty(`solution:${s.name}`);
+    save.markDirty(`file:${s.name}`);
+  }
 
   return (
     <div className="card">
-      <h3>Solutions ({solutions.length})</h3>
+      <h3>Solution files ({solutions.length})</h3>
+      <p className="muted">
+        Model and judge solutions (tagged so Polygon knows the expected verdict). Stored in
+        the project's <code>files/</code> folder alongside source files.
+      </p>
       {solutions.length === 0 && <p className="muted">No solutions.</p>}
       {solutions.map((s) => (
         <details
@@ -1210,31 +1290,26 @@ function SolutionsCard({
           }}
         >
           <summary>
-            {s.name}{" "}
+            <span className="unit-name">{s.name}</span>{" "}
             <span className="badge" data-tag={s.tag}>
               {s.tag}
             </span>
             {save.isDirty(`solution:${s.name}`) ? (
               <span className="muted"> · unsaved</span>
             ) : null}
-          </summary>
-          <div className="row" style={{ marginTop: 6 }}>
-            <label className="inline">
-              Tag
-              <select
-                value={s.tag}
-                onChange={(e) =>
-                  setSolution(s.name, { tag: e.target.value as SolutionTag })
-                }
-              >
-                {SOLUTION_TAGS.map((t) => (
-                  <option key={t} value={t}>
-                    {t} — {SOLUTION_TAG_LABELS[t]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="actions">
+            <span
+          className="unit-actions"
+          onClick={(e) => {
+            e.stopPropagation();
+            // A click on the container's own padding/gap (not a child control) would
+            // otherwise toggle the <details> — suppress only that case.
+            if (e.target === e.currentTarget) e.preventDefault();
+          }}
+        >
+              <PushToggle
+                push={s.push}
+                onChange={(v) => setSolution(s.name, { push: v })}
+              />
               <button
                 disabled={!save.isDirty(`solution:${s.name}`)}
                 onClick={() =>
@@ -1252,7 +1327,39 @@ function SolutionsCard({
               <button className="link danger" onClick={() => removeSolution(s.name)}>
                 Remove
               </button>
-            </div>
+            </span>
+          </summary>
+          <div className="row" style={{ marginTop: 6, justifyContent: "flex-start", gap: 20 }}>
+            <label className="inline">
+              Type
+              <select
+                value="solution"
+                onChange={(e) =>
+                  changeSolutionCategory(s, e.target.value as FileCategory)
+                }
+              >
+                {FILE_CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {CATEGORY_LABELS[c]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="inline">
+              Tag
+              <select
+                value={s.tag}
+                onChange={(e) =>
+                  setSolution(s.name, { tag: e.target.value as SolutionTag })
+                }
+              >
+                {SOLUTION_TAGS.map((t) => (
+                  <option key={t} value={t}>
+                    {t} — {SOLUTION_TAG_LABELS[t]}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <textarea
             className="code"
@@ -1298,7 +1405,7 @@ function FilesCard({
       (c) =>
         c.files.some((f) => f.name === name)
           ? c
-          : { ...c, files: [...c.files, { name, type, content: "", binary: false }] },
+          : { ...c, files: [...c.files, { name, type, content: "", binary: false, push: true }] },
       `file:${name}`,
     );
   }
@@ -1308,9 +1415,34 @@ function FilesCard({
     update((c) => ({ ...c, files: c.files.filter((f) => f.name !== name) }));
     save.clearDirty(`file:${name}`);
   }
+  /**
+   * Move a file to another category. "solution" turns it into a solution entry (it stays
+   * the same file on disk — both live in files/); the others just change its Polygon type.
+   * The moved unit is marked unsaved; Save in its new section persists the reclassification.
+   */
+  function changeFileCategory(f: ProjectFileEntry, cat: FileCategory): void {
+    if (cat === f.type) return;
+    if (cat === "solution") {
+      update((c) => ({
+        ...c,
+        files: c.files.filter((x) => x.name !== f.name),
+        solutions: c.solutions.some((s) => s.name === f.name)
+          ? c.solutions
+          : [
+              ...c.solutions,
+              { name: f.name, tag: "OK", content: f.content, sourceType: f.sourceType, push: f.push },
+            ],
+      }));
+      save.clearDirty(`file:${f.name}`);
+      save.markDirty(`solution:${f.name}`);
+    } else {
+      setFile(f.name, { type: cat });
+    }
+  }
 
-  const sourceFiles = files.filter((f) => f.type !== "resource");
+  const sourceFiles = files.filter((f) => f.type === "source");
   const resourceFiles = files.filter((f) => f.type === "resource");
+  const auxFiles = files.filter((f) => f.type === "aux");
 
   return (
     <>
@@ -1318,7 +1450,7 @@ function FilesCard({
         <h3>Source files ({sourceFiles.length})</h3>
         <p className="muted">
           Generators, validators, checkers and interactors (use <code>testlib.h</code>).
-          Don't put solutions here — use the Solutions tab.
+          Don't put solutions here — use the <strong>Solution files</strong> section above.
         </p>
         {sourceFiles.length === 0 && <p className="muted">No source files.</p>}
         {sourceFiles.map((f) => (
@@ -1327,6 +1459,7 @@ function FilesCard({
             file={f}
             setFile={setFile}
             removeFile={removeFile}
+            onCategory={changeFileCategory}
             path={path}
             save={save}
           />
@@ -1352,6 +1485,7 @@ function FilesCard({
             file={f}
             setFile={setFile}
             removeFile={removeFile}
+            onCategory={changeFileCategory}
             path={path}
             save={save}
             advanced
@@ -1363,6 +1497,31 @@ function FilesCard({
           onAdd={(n) => addFile(n, "resource")}
         />
       </div>
+
+      <div className="card">
+        <h3>Attachments ({auxFiles.length})</h3>
+        <p className="muted">
+          Auxiliary (<code>aux</code>) files attached to the problem but not compiled with
+          solutions — e.g. supplementary materials.
+        </p>
+        {auxFiles.length === 0 && <p className="muted">No attachments.</p>}
+        {auxFiles.map((f) => (
+          <FileEditor
+            key={f.name}
+            file={f}
+            setFile={setFile}
+            removeFile={removeFile}
+            onCategory={changeFileCategory}
+            path={path}
+            save={save}
+          />
+        ))}
+        <AddRow
+          placeholder="File name (e.g. notes.txt, image.png)"
+          label="+ Add attachment"
+          onAdd={(n) => addFile(n, "aux")}
+        />
+      </div>
     </>
   );
 }
@@ -1371,6 +1530,7 @@ function FileEditor({
   file: f,
   setFile,
   removeFile,
+  onCategory,
   path,
   save,
   advanced,
@@ -1378,10 +1538,15 @@ function FileEditor({
   file: ProjectFileEntry;
   setFile: (name: string, patch: Partial<ProjectFileEntry>) => void;
   removeFile: (name: string) => void;
+  onCategory: (file: ProjectFileEntry, cat: FileCategory) => void;
   path: string;
   save: SaveApi;
   advanced?: boolean;
 }): JSX.Element {
+  // Binary files can't become solutions (solution content must be editable text).
+  const categories = f.binary
+    ? FILE_CATEGORIES.filter((c) => c !== "solution")
+    : FILE_CATEGORIES;
   const advSummary = advanced ? describeAdvanced(f.resourceAdvancedProperties) : null;
   const id = `file:${f.name}`;
   const ref: ProjectFileRef = { kind: "file", name: f.name };
@@ -1397,48 +1562,58 @@ function FileEditor({
       }}
     >
       <summary>
-        {f.name} <span className="muted">· {f.type}</span>
+        <span className="unit-name">{f.name}</span>
+        <span className="muted"> · {CATEGORY_LABELS[f.type]}</span>
         {f.binary ? <span className="muted"> · binary</span> : null}
         {advSummary ? <span className="muted"> · {advSummary}</span> : null}
         {save.isDirty(id) ? <span className="muted"> · unsaved</span> : null}
+        <span
+          className="unit-actions"
+          onClick={(e) => {
+            e.stopPropagation();
+            // A click on the container's own padding/gap (not a child control) would
+            // otherwise toggle the <details> — suppress only that case.
+            if (e.target === e.currentTarget) e.preventDefault();
+          }}
+        >
+          {!f.binary && (
+            <>
+              <PushToggle push={f.push} onChange={(v) => setFile(f.name, { push: v })} />
+              <button
+                disabled={!save.isDirty(id)}
+                onClick={() =>
+                  save.saveUnit({
+                    ref,
+                    id,
+                    write: () => window.polygon.saveFileEntry(path, f),
+                    applyLocal,
+                    label: `file ${f.name}`,
+                  })
+                }
+              >
+                {save.isDirty(id) ? "Save" : "Saved"}
+              </button>
+            </>
+          )}
+          <button className="link danger" onClick={() => removeFile(f.name)}>
+            Remove
+          </button>
+        </span>
       </summary>
       <div className="row" style={{ marginTop: 6 }}>
         <label className="inline">
           Type
           <select
             value={f.type}
-            onChange={(e) =>
-              setFile(f.name, { type: e.target.value as ProjectFileEntry["type"] })
-            }
+            onChange={(e) => onCategory(f, e.target.value as FileCategory)}
           >
-            {FILE_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
+            {categories.map((c) => (
+              <option key={c} value={c}>
+                {CATEGORY_LABELS[c]}
               </option>
             ))}
           </select>
         </label>
-        <div className="actions">
-          {!f.binary && (
-            <button
-              disabled={!save.isDirty(id)}
-              onClick={() =>
-                save.saveUnit({
-                  ref,
-                  id,
-                  write: () => window.polygon.saveFileEntry(path, f),
-                  applyLocal,
-                  label: `file ${f.name}`,
-                })
-              }
-            >
-              {save.isDirty(id) ? "Save" : "Saved"}
-            </button>
-          )}
-          <button className="link danger" onClick={() => removeFile(f.name)}>
-            Remove
-          </button>
-        </div>
       </div>
       {f.binary ? (
         <p className="muted">Binary file — content not editable here.</p>

@@ -1,6 +1,6 @@
 {
   "name": "decagon",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Decagon — desktop app for managing Codeforces Polygon problems via the Polygon API.",
   "main": "out/main/index.js",

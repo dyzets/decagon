@@ -16,9 +16,17 @@ export interface SyncManifest {
     name: string;
     type: FileType;
     sourceType?: string;
+    /** Whether the file is pushed to Polygon (absent = true, for back-compat). */
+    push?: boolean;
     resourceAdvancedProperties?: ResourceAdvancedProperties;
   }[];
-  solutions: { name: string; tag: SolutionTag; sourceType?: string }[];
+  solutions: {
+    name: string;
+    tag: SolutionTag;
+    sourceType?: string;
+    /** Whether the solution is pushed to Polygon (absent = true, for back-compat). */
+    push?: boolean;
+  }[];
   statements: { lang: string; encoding?: string }[];
   statementResources: { name: string }[];
   /** Names of testsets that have a local tests/<name>.json or scripts/<name>.txt. */

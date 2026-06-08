@@ -55,8 +55,8 @@ import {
 
 /** Create an empty project skeleton bound to a problem. */
 export function scaffoldProject(dir: string, problemId: number, name: string): void {
+  // Solutions share the flat files/ folder, so no separate solutions/ dir is created.
   mkdirSync(join(dir, "files"), { recursive: true });
-  mkdirSync(join(dir, "solutions"), { recursive: true });
   mkdirSync(join(dir, "statements"), { recursive: true });
   mkdirSync(join(dir, "tests"), { recursive: true });
   mkdirSync(join(dir, "scripts"), { recursive: true });
@@ -144,6 +144,7 @@ export async function syncPull(
         sourceType: f.sourceType,
         content,
         binary: false,
+        push: true,
         // Grader advanced properties are only present on resource files.
         resourceAdvancedProperties:
           type === "resource" ? f.resourceAdvancedProperties : undefined,
@@ -159,6 +160,7 @@ export async function syncPull(
       tag: s.tag,
       sourceType: s.sourceType,
       content,
+      push: true,
     });
   }
 
@@ -307,6 +309,7 @@ export async function syncPush(
   // Files before checker/validator/interactor (those reference a source file name).
   for (const f of content.files) {
     if (f.binary) continue;
+    if (f.push === false) continue; // excluded from push (local-only)
     // Resource files carry grader advanced properties; send them authoritatively
     // (set when present, cleared with forTypes="" when absent). Non-resource files
     // omit them entirely so Polygon leaves nothing of the sort.
@@ -338,6 +341,7 @@ export async function syncPush(
     await problemSetInteractor(creds, problemId, content.interactor, pin);
 
   for (const s of content.solutions) {
+    if (s.push === false) continue; // excluded from push (local-only)
     await problemSaveSolution(
       creds,
       problemId,

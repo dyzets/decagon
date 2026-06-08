@@ -76,7 +76,7 @@ body {
 }
 
 .app {
-  max-width: 980px;
+  max-width: 1240px;
   margin: 0 auto;
   padding: 24px;
 }
@@ -519,6 +519,26 @@ button.tab.active {
   margin: 10px 0;
 }
 
+/* Right-aligned per-file controls (Push / Save / Remove) living in the summary row,
+   so they're operable without expanding the file. */
+.unit-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding-left: 12px;
+}
+
+/* Compact the primary button so the summary row stays a sensible height. */
+.unit-actions button:not(.link) {
+  padding: 5px 13px;
+  font-size: 13px;
+}
+
+.unit-name {
+  font-weight: 500;
+}
+
 .editor-block h4 {
   margin: 6px 0;
   font-size: 14px;
@@ -700,6 +720,149 @@ button.tab.active {
     opacity: 1;
     transform: none;
   }
+}
+
+/* ---- Detail two-column layout (editor + status sidebar) ---- */
+.detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 24px;
+  align-items: start;
+}
+
+.detail-main {
+  min-width: 0;
+}
+
+.detail-side {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  /* Stay within the viewport; scroll internally if the panels grow tall. */
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+
+/* Collapse to a single column on narrow windows; sidebar drops below the editor. */
+@media (max-width: 1080px) {
+  .detail-layout {
+    grid-template-columns: 1fr;
+  }
+  .detail-side {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+/* ---- Status sidebar ---- */
+.status-card {
+  margin-top: 16px;
+}
+
+.status-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.status-head h3 {
+  margin: 0;
+}
+
+.status-list {
+  margin: 14px 0 12px;
+}
+
+.status-row {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 13px;
+  border-top: 1px solid var(--border);
+}
+
+.status-row:first-child {
+  border-top: 0;
+}
+
+.status-row dt {
+  color: var(--muted);
+  font-size: 12px;
+  padding-top: 1px;
+}
+
+.status-row dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.status-warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+/* ---- Notifications panel ---- */
+.notif-card {
+  margin-top: 0;
+}
+
+.notif-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.notif {
+  display: flex;
+  gap: 9px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+
+.notif:first-child {
+  border-top: 0;
+}
+
+.notif-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--link);
+}
+
+.notif.success .notif-dot {
+  background: var(--success);
+}
+
+.notif.error .notif-dot {
+  background: var(--danger);
+}
+
+.notif-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.notif-msg {
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.notif-time {
+  font-size: 11px;
+  color: var(--muted);
 }
 
 /* ---- Scrollbars ---- */

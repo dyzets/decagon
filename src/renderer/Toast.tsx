@@ -16,10 +16,17 @@ interface ToastItem {
   message: string;
 }
 
+/** A toast preserved in the notification log (with the time it was raised). */
+export interface ToastNotification extends ToastItem {
+  time: number;
+}
+
 interface ToastApi {
   show: (message: string, kind?: ToastKind) => void;
   success: (message: string) => void;
   error: (message: string) => void;
+  /** Recent toasts (oldest → newest), kept after they auto-dismiss. */
+  history: ToastNotification[];
 }
 
 const ToastContext = createContext<ToastApi | null>(null);
@@ -32,9 +39,13 @@ export function useToast(): ToastApi {
 }
 
 const DISMISS_MS = 4000;
+/** Cap on the notification log so it can't grow unbounded. */
+const HISTORY_MAX = 50;
 
 export function ToastProvider({ children }: { children: ReactNode }): JSX.Element {
   const [items, setItems] = useState<ToastItem[]>([]);
+  // Persistent log shown in the notifications panel; survives auto-dismiss.
+  const [history, setHistory] = useState<ToastNotification[]>([]);
   const nextId = useRef(1);
 
   const remove = useCallback((id: number): void => {
@@ -44,7 +55,9 @@ export function ToastProvider({ children }: { children: ReactNode }): JSX.Elemen
   const show = useCallback(
     (message: string, kind: ToastKind = "info"): void => {
       const id = nextId.current++;
-      setItems((xs) => [...xs, { id, kind, message }]);
+      const item: ToastItem = { id, kind, message };
+      setItems((xs) => [...xs, item]);
+      setHistory((xs) => [...xs, { ...item, time: Date.now() }].slice(-HISTORY_MAX));
       window.setTimeout(() => remove(id), DISMISS_MS);
     },
     [remove],
@@ -55,8 +68,9 @@ export function ToastProvider({ children }: { children: ReactNode }): JSX.Elemen
       show,
       success: (m) => show(m, "success"),
       error: (m) => show(m, "error"),
+      history,
     }),
-    [show],
+    [show, history],
   );
 
   return (

@@ -112,16 +112,20 @@ export interface ProjectFileEntry {
   sourceType?: string;
   content: string;
   binary: boolean;
+  /** Whether this file is uploaded on Push to Polygon (false = local-only). */
+  push: boolean;
   /** Grader advanced properties (resource files only; experimental Polygon feature). */
   resourceAdvancedProperties?: ResourceAdvancedProperties;
 }
 
-/** A solution with its source content. */
+/** A solution with its source content. Stored alongside source files in `files/`. */
 export interface ProjectSolutionEntry {
   name: string;
   tag: SolutionTag;
   sourceType?: string;
   content: string;
+  /** Whether this solution is uploaded on Push to Polygon (false = local-only). */
+  push: boolean;
 }
 
 /** A single-language statement (all fields editable). */
