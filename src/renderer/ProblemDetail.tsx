@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   CheckerVerdict,
   FeedbackPolicy,
@@ -24,16 +24,39 @@ import type {
   ProjectTestset,
   ProjectUnitSnapshot,
   ProjectValidatorTest,
+  SyncProgress,
   SyncSummary,
 } from "../shared/ipc";
 import { NotificationsPanel, StatusSidebar } from "./StatusSidebar";
 import { useToast } from "./Toast";
+import { deriveTests, applyTestOrder } from "./testScript";
 
 function describeSync(s: SyncSummary): string {
   return (
     `${s.files} files, ${s.solutions} solutions, ${s.statements} statements, ` +
     `${s.statementResources} resources, ${s.validatorTests} validator tests, ` +
     `${s.checkerTests} checker tests`
+  );
+}
+
+/** Inline pull/push progress: the current phase label, a counter, and a thin bar. */
+function SyncProgressBar({ progress }: { progress: SyncProgress }): JSX.Element {
+  const verb = progress.op === "pull" ? "Pulling" : "Pushing";
+  const hasTotal = progress.total > 0;
+  const pct = hasTotal ? Math.round((progress.current / progress.total) * 100) : 0;
+  return (
+    <div className="sync-progress" title={`${verb}…`}>
+      <span className="muted">
+        {progress.phase}
+        {hasTotal ? ` ${progress.current}/${progress.total}` : "…"}
+      </span>
+      <span className="sync-progress-track">
+        <span
+          className={`sync-progress-fill${hasTotal ? "" : " indeterminate"}`}
+          style={hasTotal ? { width: `${pct}%` } : undefined}
+        />
+      </span>
+    </div>
   );
 }
 
@@ -262,6 +285,8 @@ interface SaveApi {
     id: string,
     applyLocal: (disk: ProjectUnitSnapshot) => void,
   ): void;
+  /** Re-read a unit from disk and store it as the new external-change baseline. */
+  refreshBaseline(ref: ProjectFileRef): Promise<void>;
 }
 
 export function ProblemDetail({
@@ -281,6 +306,7 @@ export function ProblemDetail({
   // Ids of sections/units with unsaved in-memory edits.
   const [dirty, setDirty] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
+  const [progress, setProgress] = useState<SyncProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<TabId>("info");
   // Bumped after each load/pull/push so the status sidebar re-fetches live metadata.
@@ -309,6 +335,32 @@ export function ProblemDetail({
 
   useEffect(() => {
     void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path]);
+
+  // Live pull/push progress from main, shown in the savebar while busy.
+  useEffect(() => window.polygon.onSyncProgress(setProgress), []);
+
+  // Auto-reload: watch the project folder and reload when it changes on disk. We skip
+  // reloading while busy (pull/push reload themselves) or when there are unsaved edits —
+  // those are surfaced per-unit by the existing external-change conflict prompts, so a
+  // blanket reload never clobbers work in progress.
+  const dirtyRef = useRef(dirty);
+  const busyRef = useRef(busy);
+  dirtyRef.current = dirty;
+  busyRef.current = busy;
+  useEffect(() => {
+    void window.polygon.watchProject(path);
+    const off = window.polygon.onProjectChanged((changed) => {
+      if (changed !== path || busyRef.current !== null || dirtyRef.current.size > 0) {
+        return;
+      }
+      void load();
+    });
+    return () => {
+      off();
+      void window.polygon.unwatchProject();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
 
@@ -408,6 +460,11 @@ export function ProblemDetail({
         }
       })();
     },
+    async refreshBaseline(ref) {
+      const rid = refId(ref);
+      const disk = await window.polygon.readProjectUnit(path, ref).catch(() => null);
+      if (disk) setBaseline(rid, disk);
+    },
   };
 
   async function pull(): Promise<void> {
@@ -418,6 +475,7 @@ export function ProblemDetail({
       return;
     }
     setBusy("pull");
+    setProgress(null);
     setError(null);
     try {
       const s = await window.polygon.pullProject(path);
@@ -429,6 +487,7 @@ export function ProblemDetail({
       toast.error(m);
     } finally {
       setBusy(null);
+      setProgress(null);
     }
   }
 
@@ -445,6 +504,7 @@ export function ProblemDetail({
       return;
     }
     setBusy("push");
+    setProgress(null);
     setError(null);
     try {
       const s = await window.polygon.pushProject(path);
@@ -459,6 +519,7 @@ export function ProblemDetail({
       toast.error(m);
     } finally {
       setBusy(null);
+      setProgress(null);
     }
   }
 
@@ -479,8 +540,7 @@ export function ProblemDetail({
       <p className="muted">
         Editing the local project folder. Each file has its own <strong>Save</strong>{" "}
         (writes that file to the folder); <strong>Push to Polygon</strong> uploads the
-        saved folder. <strong>Pull</strong> downloads the current Polygon state. Saving a
-        generation script also pushes it to Polygon.
+        saved folder. <strong>Pull</strong> downloads the current Polygon state.
       </p>
 
       <BindingBar
@@ -492,7 +552,9 @@ export function ProblemDetail({
 
       <div className="row savebar">
         <div>
-          {dirty.size > 0 ? (
+          {busy && progress ? (
+            <SyncProgressBar progress={progress} />
+          ) : dirty.size > 0 ? (
             <span className="muted">
               {dirty.size} unsaved item{dirty.size === 1 ? "" : "s"}
             </span>
@@ -578,7 +640,6 @@ export function ProblemDetail({
             enablePoints={content.info.enablePoints}
             update={update}
             path={path}
-            problemId={pid}
             save={saveApi}
           />
         )}
@@ -1752,14 +1813,12 @@ function TestsCard({
   enablePoints,
   update,
   path,
-  problemId,
   save,
 }: {
   testsets: ProjectTestset[];
   enablePoints: PointsEnableMode;
   update: Updater;
   path: string;
-  problemId: number;
   save: SaveApi;
 }): JSX.Element {
   return (
@@ -1788,8 +1847,9 @@ function TestsCard({
       </label>
       <p className="muted">
         Points mode is problem-wide — save it from the <strong>Info</strong> tab. Each
-        testset below has its own <strong>Save tests</strong>; saving the generation
-        script also pushes it to Polygon.
+        testset has one <strong>Save tests</strong> that writes its tests, groups and
+        generation script to the folder. Nothing is pushed until you use{" "}
+        <strong>Push to Polygon</strong>.
       </p>
       {testsets.length === 0 && <p className="muted">No testsets.</p>}
       {testsets.map((ts, tsi) => (
@@ -1799,7 +1859,6 @@ function TestsCard({
           tsi={tsi}
           update={update}
           path={path}
-          problemId={problemId}
           save={save}
         />
       ))}
@@ -1834,14 +1893,12 @@ function TestsetEditor({
   tsi,
   update,
   path,
-  problemId,
   save,
 }: {
   ts: ProjectTestset;
   tsi: number;
   update: Updater;
   path: string;
-  problemId: number;
   save: SaveApi;
 }): JSX.Element {
   // Selection state (by test index / group name) for bulk edits.
@@ -1853,12 +1910,13 @@ function TestsetEditor({
   const [bulkPP, setBulkPP] = useState<PointsPolicy>("EACH_TEST");
   const [bulkFP, setBulkFP] = useState<FeedbackPolicy>("COMPLETE");
   const [savingTests, setSavingTests] = useState(false);
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
   const toast = useToast();
 
+  // Everything in this testset — tests, groups, and the generation script — shares one
+  // unsaved flag and is persisted together by "Save tests" (locally; Push is separate).
   const testsId = `tests:${ts.name}`;
-  const scriptId = `script:${ts.name}`;
 
-  // Test/group edits mark this testset's metadata dirty (saved via "Save tests").
   function mutate(fn: (ts: ProjectTestset) => ProjectTestset): void {
     update(
       (c) => ({
@@ -1871,23 +1929,20 @@ function TestsetEditor({
   function setTestset(patch: Partial<ProjectTestset>): void {
     mutate((x) => ({ ...x, ...patch }));
   }
-  // The generation script is a separate file unit; its edits mark the script dirty.
   function setScript(script: string): void {
-    update(
-      (c) => ({
-        ...c,
-        testsets: c.testsets.map((x, j) => (j === tsi ? { ...x, script } : x)),
-      }),
-      scriptId,
-    );
+    mutate((x) => ({ ...x, script }));
   }
 
+  // Save the whole testset to the folder: tests + group settings + the generation
+  // script. This does NOT push to Polygon — use the toolbar's "Push to Polygon".
   async function saveTests(): Promise<void> {
     setSavingTests(true);
     try {
       await window.polygon.saveTestset(path, ts);
+      await window.polygon.saveScript(path, ts.name, ts.script);
+      await save.refreshBaseline({ kind: "script", testset: ts.name });
       save.clearDirty(testsId);
-      toast.success(`Saved ${ts.name} tests.`);
+      toast.success(`Saved ${ts.name} tests, groups & script (not pushed).`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1895,25 +1950,38 @@ function TestsetEditor({
     }
   }
 
-  // Saving the script writes it to the folder and pushes it to Polygon (requires a bound
-  // problem). A conflict check runs first via saveUnit.
-  function saveScript(): void {
-    void save.saveUnit({
-      ref: { kind: "script", testset: ts.name },
-      id: scriptId,
-      write: async () => {
-        await window.polygon.saveScript(path, ts.name, ts.script);
-        await window.polygon.pushScript(path, ts.name);
-      },
-      applyLocal: (disk) => setScript(disk.content),
-      label: `script (${ts.name}) + push`,
-    });
-  }
   function setTest(index: number, patch: Partial<ProjectTestEntry>): void {
     mutate((x) => ({
       ...x,
       tests: x.tests.map((t) => (t.index === index ? { ...t, ...patch } : t)),
     }));
+  }
+
+  // Reorder/delete renumber tests 1..N and rewrite the generation script to match;
+  // tests + script share one unsaved flag, persisted together by "Save tests".
+  function applyOrder(ordered: ProjectTestEntry[]): void {
+    mutate((x) => applyTestOrder(x, ordered));
+  }
+  // Drag-and-drop: drop the dragged test at the position of the test it's dropped on.
+  function dropOnTest(targetIndex: number): void {
+    if (dragIdx === null || dragIdx === targetIndex) {
+      setDragIdx(null);
+      return;
+    }
+    const order = [...ts.tests];
+    const from = order.findIndex((t) => t.index === dragIdx);
+    const to = order.findIndex((t) => t.index === targetIndex);
+    setDragIdx(null);
+    if (from < 0 || to < 0) return;
+    const [moved] = order.splice(from, 1);
+    order.splice(to, 0, moved!);
+    applyOrder(order);
+  }
+  // Re-derive generated tests from the (just-edited) script, keeping manual tests.
+  function syncTestsFromScript(): void {
+    const next = deriveTests(ts.script, ts.tests);
+    if (JSON.stringify(next) === JSON.stringify(ts.tests)) return;
+    mutate((x) => ({ ...x, tests: next }));
   }
   function addManualTest(): void {
     mutate((x) => {
@@ -1975,7 +2043,7 @@ function TestsetEditor({
     }));
   }
   function bulkDeleteTests(): void {
-    mutate((x) => ({ ...x, tests: x.tests.filter((t) => !sel.has(t.index)) }));
+    applyOrder(ts.tests.filter((t) => !sel.has(t.index)));
     clearTestSel();
   }
 
@@ -2149,19 +2217,7 @@ function TestsetEditor({
 
       <div className="field">
         <div className="row" style={{ marginTop: 0 }}>
-          <span className="muted">
-            Generation script
-            {save.isDirty(scriptId) ? " · unsaved" : ""}
-          </span>
-          <button
-            onClick={saveScript}
-            disabled={!problemId || !save.isDirty(scriptId)}
-            title={
-              problemId ? undefined : "Bind a Polygon problem to save & push the script"
-            }
-          >
-            {save.isDirty(scriptId) ? "Save script & push" : "Script saved"}
-          </button>
+          <span className="muted">Generation script</span>
         </div>
         <textarea
           className="code"
@@ -2169,12 +2225,19 @@ function TestsetEditor({
           placeholder="gen 1 5 > $"
           value={ts.script}
           onFocus={() =>
-            save.checkOnOpen({ kind: "script", testset: ts.name }, scriptId, (disk) =>
+            save.checkOnOpen({ kind: "script", testset: ts.name }, testsId, (disk) =>
               setScript(disk.content),
             )
           }
           onChange={(e) => setScript(e.target.value)}
+          onBlur={syncTestsFromScript}
         />
+        <p className="muted">
+          Editing the script updates the test list below. Each line is{" "}
+          <code>generator [params] &gt; index</code>, <code>&gt; $</code> (next free
+          index), or <code>&gt; {"{1-3,7}"}</code> (one run, several tests). Drag tests by
+          the <span aria-hidden>⠿</span> handle to reorder — this rewrites the script.
+        </p>
       </div>
 
       <div className="row" style={{ marginTop: 6 }}>
@@ -2221,8 +2284,35 @@ function TestsetEditor({
       )}
 
       {ts.tests.map((t) => (
-        <details key={t.index} className="editor-block">
+        <details
+          key={t.index}
+          className={`editor-block${dragIdx === t.index ? " dragging" : ""}`}
+          onDragOver={(e) => {
+            if (dragIdx !== null) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            dropOnTest(t.index);
+          }}
+        >
           <summary>
+            <span
+              className="drag-handle"
+              draggable
+              title="Drag to reorder"
+              onDragStart={(e) => {
+                e.stopPropagation();
+                setDragIdx(t.index);
+              }}
+              onDragEnd={() => setDragIdx(null)}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              aria-hidden
+            >
+              ⠿
+            </span>
             <input
               type="checkbox"
               checked={sel.has(t.index)}
@@ -2460,12 +2550,6 @@ function ValidatorTestsCard({
       };
     }, "vtests");
   }
-  function removeTest(i: number): void {
-    update((c) => ({
-      ...c,
-      validatorTests: c.validatorTests.filter((_, j) => j !== i),
-    }), "vtests");
-  }
   async function saveAll(): Promise<void> {
     setBusy(true);
     try {
@@ -2536,9 +2620,6 @@ function ValidatorTestsCard({
               onChange={(e) => setTest(i, { input: e.target.value })}
             />
           </label>
-          <button className="link danger" onClick={() => removeTest(i)}>
-            Remove test
-          </button>
         </details>
       ))}
     </div>
@@ -2577,9 +2658,6 @@ function CheckerTestsCard({
         ],
       };
     }, "ctests");
-  }
-  function removeTest(i: number): void {
-    update((c) => ({ ...c, checkerTests: c.checkerTests.filter((_, j) => j !== i) }), "ctests");
   }
   async function saveAll(): Promise<void> {
     setBusy(true);
@@ -2657,9 +2735,6 @@ function CheckerTestsCard({
               onChange={(e) => setTest(i, { answer: e.target.value })}
             />
           </label>
-          <button className="link danger" onClick={() => removeTest(i)}>
-            Remove test
-          </button>
         </details>
       ))}
     </div>

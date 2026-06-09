@@ -1,5 +1,5 @@
 import { ipcMain, dialog, shell, BrowserWindow } from "electron";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 import {
   IPC,
@@ -247,7 +247,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));
 
   // --- pull/push a project by folder path (problemId from the manifest) ---
-  ipcMain.handle(IPC.pullProject, (_e, path: string, pin?: string) => {
+  ipcMain.handle(IPC.pullProject, (e, path: string, pin?: string) => {
     const manifest = readManifest(path);
     return syncPull(
       requireCredentials(),
@@ -255,11 +255,38 @@ export function registerIpcHandlers(): void {
       path,
       manifest.name,
       pin,
+      (p) => e.sender.send(IPC.syncProgress, p),
     );
   });
-  ipcMain.handle(IPC.pushProject, (_e, path: string, pin?: string) =>
-    syncPush(requireCredentials(), path, pin),
+  ipcMain.handle(IPC.pushProject, (e, path: string, pin?: string) =>
+    syncPush(requireCredentials(), path, pin, (p) =>
+      e.sender.send(IPC.syncProgress, p),
+    ),
   );
+
+  // --- auto-reload: watch a project folder and notify the renderer on disk changes ---
+  // A single active watcher (the app shows one project detail view at a time). Events
+  // are debounced so a burst of writes (e.g. a pull) yields one reload signal.
+  let watcher: { fsw: FSWatcher; timer?: NodeJS.Timeout } | null = null;
+  const stopWatch = (): void => {
+    if (watcher?.timer) clearTimeout(watcher.timer);
+    watcher?.fsw.close();
+    watcher = null;
+  };
+  ipcMain.handle(IPC.watchProject, (e, path: string) => {
+    stopWatch();
+    try {
+      const fsw = watch(path, { recursive: true }, () => {
+        if (!watcher) return;
+        if (watcher.timer) clearTimeout(watcher.timer);
+        watcher.timer = setTimeout(() => e.sender.send(IPC.projectChanged, path), 250);
+      });
+      watcher = { fsw };
+    } catch {
+      // Folder may be missing/unwatchable — auto-reload just won't fire.
+    }
+  });
+  ipcMain.handle(IPC.unwatchProject, () => stopWatch());
 
   // --- local project editing: targeted per-unit folder saves (no network/creds) ---
   ipcMain.handle(IPC.projectRead, (_e, path: string) => readProjectContent(path));

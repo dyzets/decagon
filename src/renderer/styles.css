@@ -96,6 +96,19 @@ h1 {
   margin: 0;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  display: block;
+}
+
 /* ---- Cards ---- */
 .card {
   background: var(--card);
@@ -503,10 +516,70 @@ button.tab.active {
   padding-inline: 18px;
 }
 
+/* ---- Pull/push progress ---- */
+.sync-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 240px;
+}
+
+.sync-progress > span:first-child {
+  font-size: 12px;
+}
+
+.sync-progress-track {
+  position: relative;
+  overflow: hidden;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.sync-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.sync-progress-fill.indeterminate {
+  width: 40%;
+  animation: sync-progress-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes sync-progress-slide {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
 /* ---- Add row ---- */
 .addrow {
   gap: 8px;
   margin-top: 10px;
+}
+
+/* ---- Drag-to-reorder tests ---- */
+.drag-handle {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 2px;
+  cursor: grab;
+  color: var(--muted);
+  user-select: none;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.editor-block.dragging {
+  opacity: 0.5;
 }
 
 .addrow input {

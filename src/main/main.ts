@@ -1,5 +1,6 @@
 import { app, BrowserWindow, shell } from "electron";
 import { join } from "node:path";
+import icon from "../../resources/icon.png?asset";
 import { registerIpcHandlers } from "./ipc";
 
 // electron-vite injects these env vars during dev to point at the dev server.
@@ -11,6 +12,7 @@ function createWindow(): void {
     height: 720,
     show: false,
     title: "Decagon",
+    icon,
     webPreferences: {
       // Security: isolate the renderer; only the preload bridge is exposed.
       preload: join(__dirname, "../preload/preload.js"),

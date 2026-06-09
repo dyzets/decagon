@@ -3,6 +3,7 @@ import type { CredentialsStatus } from "../shared/ipc";
 import { ProblemDetail } from "./ProblemDetail";
 import { ProjectsView } from "./ProjectsView";
 import { useToast } from "./Toast";
+import logo from "../../resources/icon.png";
 
 interface Selection {
   path: string;
@@ -35,7 +36,10 @@ export function App(): JSX.Element {
   return (
     <div className="app">
       <div className="row appbar">
-        <h1>Decagon</h1>
+        <div className="brand">
+          <img className="brand-logo" src={logo} alt="" />
+          <h1>Decagon</h1>
+        </div>
         <button className="link" onClick={toggleTheme}>
           {theme === "dark" ? "☀ Light mode" : "🌙 Dark mode"}
         </button>

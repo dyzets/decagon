@@ -52,6 +52,12 @@ export const IPC = {
   // pull/push using a known project path (problemId comes from the folder manifest)
   pullProject: "sync:pullProject",
   pushProject: "sync:pushProject",
+  // main → renderer progress events emitted during a pull/push
+  syncProgress: "sync:progress",
+  // watch a project folder for on-disk changes (auto-reload)
+  watchProject: "sync:watchProject",
+  unwatchProject: "sync:unwatchProject",
+  projectChanged: "sync:projectChanged",
   // local project editing (reads/writes the project folder only — no network)
   projectRead: "project:read",
   // targeted per-unit folder saves (no network) + a single Polygon script push
@@ -68,6 +74,20 @@ export const IPC = {
   projectSaveCheckerTests: "project:saveCheckerTests",
   problemPushScript: "polygon:problem.saveScript",
 } as const;
+
+/**
+ * Progress event emitted from main during a pull/push so the UI can show how far
+ * along it is. `total === 0` marks an indeterminate phase (just show the label).
+ */
+export interface SyncProgress {
+  op: "pull" | "push";
+  /** Human-readable phase label, e.g. "Uploading files". */
+  phase: string;
+  /** Units completed in this phase. */
+  current: number;
+  /** Units in this phase (0 = indeterminate). */
+  total: number;
+}
 
 /** Counts returned by a pull/push operation. */
 export interface SyncSummary {
@@ -315,6 +335,14 @@ export interface PolygonBridge {
   // Pull/push a project by its folder path; the problemId comes from the manifest.
   pullProject(path: string, pin?: string): Promise<SyncSummary>;
   pushProject(path: string, pin?: string): Promise<SyncSummary>;
+  /** Subscribe to pull/push progress events. Returns an unsubscribe function. */
+  onSyncProgress(callback: (progress: SyncProgress) => void): () => void;
+  /** Start watching a project folder for on-disk changes (replaces any prior watch). */
+  watchProject(path: string): Promise<void>;
+  /** Stop watching the current project folder. */
+  unwatchProject(): Promise<void>;
+  /** Subscribe to "folder changed on disk" events. Returns an unsubscribe function. */
+  onProjectChanged(callback: (path: string) => void): () => void;
 
   // Read the editable project content from the local folder (no network).
   readProject(path: string): Promise<ProjectContent>;

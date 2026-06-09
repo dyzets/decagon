@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "package": "electron-vite build && electron-builder",
     "selftest": "tsx src/core/sign.selftest.ts",
+    "selftest:script": "tsx src/core/script.selftest.ts",
     "cli": "tsx src/test-cli.ts"
   },
   "dependencies": {},
@@ -32,7 +33,7 @@
   "build": {
     "appId": "com.example.decagon",
     "productName": "Decagon",
-    "files": ["out/**/*"],
+    "files": ["out/**/*", "resources/**/*"],
     "directories": { "output": "release" },
     "win": { "target": "nsis" },
     "mac": { "target": "dmg" },

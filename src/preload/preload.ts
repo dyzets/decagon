@@ -43,6 +43,19 @@ const bridge: PolygonBridge = {
 
   pullProject: (path, pin) => ipcRenderer.invoke(IPC.pullProject, path, pin),
   pushProject: (path, pin) => ipcRenderer.invoke(IPC.pushProject, path, pin),
+  onSyncProgress: (callback) => {
+    const listener = (_e: unknown, progress: Parameters<typeof callback>[0]) =>
+      callback(progress);
+    ipcRenderer.on(IPC.syncProgress, listener);
+    return () => ipcRenderer.removeListener(IPC.syncProgress, listener);
+  },
+  watchProject: (path) => ipcRenderer.invoke(IPC.watchProject, path),
+  unwatchProject: () => ipcRenderer.invoke(IPC.unwatchProject),
+  onProjectChanged: (callback) => {
+    const listener = (_e: unknown, path: string) => callback(path);
+    ipcRenderer.on(IPC.projectChanged, listener);
+    return () => ipcRenderer.removeListener(IPC.projectChanged, listener);
+  },
 
   readProject: (path) => ipcRenderer.invoke(IPC.projectRead, path),
   readProjectUnit: (path, ref) => ipcRenderer.invoke(IPC.projectReadUnit, path, ref),

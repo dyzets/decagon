@@ -42,8 +42,11 @@ import type {
   ProjectContent,
   ProjectStatementEntry,
   ProjectStatementResource,
+  ProjectTestEntry,
+  SyncProgress,
   SyncSummary,
 } from "../shared/ipc";
+import type { Test } from "../core/types";
 import { emptyManifest, readManifest, writeManifest } from "./manifest";
 import {
   STATEMENT_FILES,
@@ -52,6 +55,33 @@ import {
   readProjectContent,
   writeProjectContent,
 } from "./projectContent";
+
+/** Callback used to report pull/push progress to the caller (forwarded to the UI). */
+export type ProgressReporter = (progress: SyncProgress) => void;
+
+/**
+ * Max in-flight Polygon requests during pull/push. Independent operations (files,
+ * solutions, tests, …) run concurrently up to this limit, which cuts sync time
+ * roughly N-fold while staying well within Polygon's tolerance.
+ */
+const SYNC_CONCURRENCY = 8;
+
+/** Run an async task over each item with bounded concurrency (fail-fast). */
+async function runPool<T>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      await fn(items[i]!);
+    }
+  };
+  const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
+  await Promise.all(workers);
+}
 
 /** Create an empty project skeleton bound to a problem. */
 export function scaffoldProject(dir: string, problemId: number, name: string): void {
@@ -74,18 +104,23 @@ export async function syncPull(
   dir: string,
   name?: string,
   pin?: string,
+  onProgress?: ProgressReporter,
 ): Promise<SyncSummary> {
   if (!problemId) {
     throw new Error(
       "This project isn't bound to a Polygon problem yet. Set its problem id first.",
     );
   }
+  const report = (phase: string, current: number, total: number) =>
+    onProgress?.({ op: "pull", phase, current, total });
+
   // Polygon exposes no getter for "enable points"/"enable groups", so we infer them
   // from the pulled data below (the points/group fields only appear when enabled).
   // We still read the previous local content to recover the YES-vs-PERCENT points
   // distinction, which is genuinely undetectable from the API.
   const prev = readProjectContent(dir);
 
+  report("Fetching problem data", 0, 0);
   const [info, solutions, files, statements, stmtResources, tests] = await Promise.all([
     problemInfo(creds, problemId, pin),
     problemSolutions(creds, problemId, pin),
@@ -115,9 +150,12 @@ export async function syncPull(
   ]);
 
   // Statement resources: binary ones (images) are written to disk now; text ones
-  // travel inside the content so writeProjectContent persists them.
+  // travel inside the content so writeProjectContent persists them. Downloaded
+  // concurrently to keep pull fast.
   const resourceEntries: ProjectStatementResource[] = [];
-  for (const r of stmtResources) {
+  let resDone = 0;
+  report("Downloading statement resources", 0, stmtResources.length);
+  await runPool(stmtResources, SYNC_CONCURRENCY, async (r) => {
     const bytes = await problemViewStatementResource(creds, problemId, r.name, pin);
     const buf = Buffer.from(bytes);
     const binary = isBinary(buf);
@@ -127,33 +165,37 @@ export async function syncPull(
     } else {
       resourceEntries.push({ name: r.name, content: buf.toString("utf8"), binary: false });
     }
-  }
+    report("Downloading statement resources", ++resDone, stmtResources.length);
+  });
 
-  const fileEntries = [];
-  const groups: [FileType, typeof files.sourceFiles][] = [
-    ["source", files.sourceFiles],
-    ["resource", files.resourceFiles],
-    ["aux", files.auxFiles],
+  const fileEntries: ProjectContent["files"] = [];
+  const fileTargets: { type: FileType; f: (typeof files.sourceFiles)[number] }[] = [
+    ...files.sourceFiles.map((f) => ({ type: "source" as FileType, f })),
+    ...files.resourceFiles.map((f) => ({ type: "resource" as FileType, f })),
+    ...files.auxFiles.map((f) => ({ type: "aux" as FileType, f })),
   ];
-  for (const [type, list] of groups) {
-    for (const f of list) {
-      const content = await problemViewFile(creds, problemId, type, f.name, pin);
-      fileEntries.push({
-        name: f.name,
-        type,
-        sourceType: f.sourceType,
-        content,
-        binary: false,
-        push: true,
-        // Grader advanced properties are only present on resource files.
-        resourceAdvancedProperties:
-          type === "resource" ? f.resourceAdvancedProperties : undefined,
-      });
-    }
-  }
+  let fileDone = 0;
+  report("Downloading files", 0, fileTargets.length);
+  await runPool(fileTargets, SYNC_CONCURRENCY, async ({ type, f }) => {
+    const content = await problemViewFile(creds, problemId, type, f.name, pin);
+    fileEntries.push({
+      name: f.name,
+      type,
+      sourceType: f.sourceType,
+      content,
+      binary: false,
+      push: true,
+      // Grader advanced properties are only present on resource files.
+      resourceAdvancedProperties:
+        type === "resource" ? f.resourceAdvancedProperties : undefined,
+    });
+    report("Downloading files", ++fileDone, fileTargets.length);
+  });
 
-  const solutionEntries = [];
-  for (const s of solutions) {
+  const solutionEntries: ProjectContent["solutions"] = [];
+  let solDone = 0;
+  report("Downloading solutions", 0, solutions.length);
+  await runPool(solutions, SYNC_CONCURRENCY, async (s) => {
     const content = await problemViewSolution(creds, problemId, s.name, pin);
     solutionEntries.push({
       name: s.name,
@@ -162,6 +204,19 @@ export async function syncPull(
       content,
       push: true,
     });
+    report("Downloading solutions", ++solDone, solutions.length);
+  });
+
+  // Preserve local-only files/solutions: anything present in the folder but not on
+  // Polygon is kept as-is (it would otherwise be deleted by the authoritative
+  // writeProjectContent). This keeps locally-added files that were never pushed.
+  const pulledFileNames = new Set(fileEntries.map((f) => f.name));
+  for (const f of prev.files) {
+    if (!pulledFileNames.has(f.name)) fileEntries.push(f);
+  }
+  const pulledSolutionNames = new Set(solutionEntries.map((s) => s.name));
+  for (const s of prev.solutions) {
+    if (!pulledSolutionNames.has(s.name)) solutionEntries.push(s);
   }
 
   const statementEntries: ProjectStatementEntry[] = Object.entries(statements).map(
@@ -249,6 +304,7 @@ export async function syncPull(
     })),
   };
 
+  report("Saving to folder", 0, 0);
   writeProjectContent(dir, content);
 
   // Record the pull time (writeProjectContent rewrites the rest of the manifest).
@@ -276,6 +332,7 @@ export async function syncPush(
   creds: PolygonCredentials,
   dir: string,
   pin?: string,
+  onProgress?: ProgressReporter,
 ): Promise<SyncSummary> {
   const content = readProjectContent(dir);
   const problemId = content.problemId;
@@ -284,6 +341,8 @@ export async function syncPush(
       "This project isn't bound to a Polygon problem yet. Set its problem id first.",
     );
   }
+  const report = (phase: string, current: number, total: number) =>
+    onProgress?.({ op: "push", phase, current, total });
   const summary: SyncSummary = {
     files: 0,
     solutions: 0,
@@ -294,6 +353,7 @@ export async function syncPush(
   };
 
   // Info first so limits/flags are applied before everything else.
+  report("Updating problem info", 0, 0);
   await problemUpdateInfo(creds, problemId, content.info, pin);
   // Points mode: NO → off; YES → on; PERCENT → on + treat checker points as percent.
   // enablePoints must be applied before the percent flag (which requires points on).
@@ -307,9 +367,10 @@ export async function syncPush(
   );
 
   // Files before checker/validator/interactor (those reference a source file name).
-  for (const f of content.files) {
-    if (f.binary) continue;
-    if (f.push === false) continue; // excluded from push (local-only)
+  // Files are mutually independent, so push them concurrently.
+  const filesToPush = content.files.filter((f) => !f.binary && f.push !== false);
+  report("Uploading files", 0, filesToPush.length);
+  await runPool(filesToPush, SYNC_CONCURRENCY, async (f) => {
     // Resource files carry grader advanced properties; send them authoritatively
     // (set when present, cleared with forTypes="" when absent). Non-resource files
     // omit them entirely so Polygon leaves nothing of the sort.
@@ -331,17 +392,38 @@ export async function syncPush(
       },
       pin,
     );
-    summary.files++;
-  }
+    report("Uploading files", ++summary.files, filesToPush.length);
+  });
 
-  if (content.checker) await problemSetChecker(creds, problemId, content.checker, pin);
-  if (content.validator)
-    await problemSetValidator(creds, problemId, content.validator, pin);
-  if (content.interactor)
-    await problemSetInteractor(creds, problemId, content.interactor, pin);
+  // Checker/validator/interactor: always send the current value — including an empty
+  // string — so clearing one in the app actually unsets it on Polygon. (Previously we
+  // only sent non-empty values, so a removed checker/validator stayed attached.)
+  // Clearing may be rejected for a required field (e.g. checker), so tolerate failures
+  // when sending empty; a non-empty assignment still propagates real errors.
+  report("Setting checker/validator/interactor", 0, 0);
+  const setOrClear = async (
+    value: string | undefined,
+    set: (v: string) => Promise<void>,
+  ): Promise<void> => {
+    const v = value ?? "";
+    try {
+      await set(v);
+    } catch (err) {
+      if (v !== "") throw err; // a real assignment failed
+      // Clearing isn't supported for this field — leave it as-is on Polygon.
+    }
+  };
+  await setOrClear(content.checker, (v) => problemSetChecker(creds, problemId, v, pin));
+  await setOrClear(content.validator, (v) =>
+    problemSetValidator(creds, problemId, v, pin),
+  );
+  await setOrClear(content.interactor, (v) =>
+    problemSetInteractor(creds, problemId, v, pin),
+  );
 
-  for (const s of content.solutions) {
-    if (s.push === false) continue; // excluded from push (local-only)
+  const solutionsToPush = content.solutions.filter((s) => s.push !== false);
+  report("Uploading solutions", 0, solutionsToPush.length);
+  await runPool(solutionsToPush, SYNC_CONCURRENCY, async (s) => {
     await problemSaveSolution(
       creds,
       problemId,
@@ -354,10 +436,11 @@ export async function syncPush(
       },
       pin,
     );
-    summary.solutions++;
-  }
+    report("Uploading solutions", ++summary.solutions, solutionsToPush.length);
+  });
 
-  for (const st of content.statements) {
+  report("Uploading statements", 0, content.statements.length);
+  await runPool(content.statements, SYNC_CONCURRENCY, async (st) => {
     const fields: Record<string, string> = {};
     for (const field of Object.keys(STATEMENT_FILES) as (keyof typeof STATEMENT_FILES)[]) {
       const value = st[field];
@@ -368,42 +451,52 @@ export async function syncPush(
       await problemSaveStatement(creds, problemId, st.lang, fields, pin);
       summary.statements++;
     }
-  }
+    report("Uploading statements", summary.statements, content.statements.length);
+  });
 
   // Statement resources (text only; binary like images is skipped — the client
   // uploads text, and pull still fetches the binary ones).
-  for (const r of content.statementResources) {
-    if (r.binary) continue;
+  const resourcesToPush = content.statementResources.filter((r) => !r.binary);
+  report("Uploading statement resources", 0, resourcesToPush.length);
+  await runPool(resourcesToPush, SYNC_CONCURRENCY, async (r) => {
     await problemSaveStatementResource(
       creds,
       problemId,
       { name: r.name, file: r.content, checkExisting: false },
       pin,
     );
-    summary.statementResources++;
-  }
+    report(
+      "Uploading statement resources",
+      ++summary.statementResources,
+      resourcesToPush.length,
+    );
+  });
 
   // Test-generation scripts and manual tests, per testset.
   // Testsets are created on the Polygon website, never by this app — Polygon's API
   // has no create-testset endpoint (a testset only exists once a test is added, and
   // saveScript/enableGroups both require it to already exist). The app only edits
   // testsets that were pulled from Polygon, so we assume each one already exists.
+  const totalTests = content.testsets.reduce((n, ts) => n + ts.tests.length, 0);
+  let testsDone = 0;
+  report("Uploading tests", 0, totalTests);
   for (const ts of content.testsets) {
     if (ts.script !== undefined && ts.script.trim() !== "") {
+      report(`Saving script (${ts.name})`, testsDone, totalTests);
       await problemSaveScript(creds, problemId, ts.name, ts.script, pin);
     }
 
     // Delete tests removed locally: anything currently on Polygon but no longer in
     // the local content is removed (this is how a test gets deleted on Polygon).
     const localIndices = new Set(ts.tests.map((t) => t.index));
-    let serverTests: typeof ts.tests | { index: number }[] = [];
+    let serverTests: Test[] = [];
     try {
       serverTests = await problemTests(creds, problemId, ts.name, pin);
     } catch {
       serverTests = [];
     }
-    const serverIndices = new Set(serverTests.map((t) => t.index));
-    const toDelete = [...serverIndices].filter((i) => !localIndices.has(i));
+    const serverByIndex = new Map(serverTests.map((t) => [t.index, t]));
+    const toDelete = [...serverByIndex.keys()].filter((i) => !localIndices.has(i));
     if (toDelete.length > 0) {
       await problemDeleteTests(creds, problemId, ts.name, toDelete, pin);
     }
@@ -412,13 +505,51 @@ export async function syncPush(
     // any test's group below).
     await problemEnableGroups(creds, problemId, ts.name, ts.enableGroups, pin);
 
-    for (const t of ts.tests) {
+    // A test already matches Polygon when every field we'd send equals the server's,
+    // so re-uploading it would be a no-op. Skipping those is the main speed-up on
+    // re-push (only changed tests hit the network). Input is normalized for CRLF and a
+    // trailing newline (Polygon often stores one) to avoid false differences.
+    const norm = (s: string | undefined): string =>
+      (s ?? "").replace(/\r\n/g, "\n").replace(/\n+$/, "");
+    const unchanged = (t: ProjectTestEntry, sv: Test | undefined): boolean => {
+      if (!sv) return false;
+      const localManual = t.manual && t.input !== undefined;
+      const serverManual = sv.manual && sv.input !== undefined;
+      if (localManual !== serverManual) return false;
+      if (localManual && norm(t.input) !== norm(sv.input)) return false;
+      // group/points are always (re)sent when their feature is on.
+      if (ts.enableGroups && (t.group ?? "") !== (sv.group ?? "")) return false;
+      if (pointsOn && (t.points ?? 0) !== (sv.points ?? 0)) return false;
+      // description/useInStatements are only sent when set locally — compare just then.
+      if (t.description !== undefined && t.description !== (sv.description ?? ""))
+        return false;
+      if (t.useInStatements !== undefined && t.useInStatements !== sv.useInStatements)
+        return false;
+      return true;
+    };
+
+    // Tests target distinct indices, so push them concurrently.
+    await runPool(ts.tests, SYNC_CONCURRENCY, async (t) => {
       const isManual = t.manual && t.input !== undefined;
-      // Manual tests carry their input (add or edit). Generated tests are produced by
-      // the script, but we still push their metadata (group/points/description/example)
-      // by editing the existing test — only if it already exists on Polygon, otherwise
-      // saveTest would try to *add* it (which requires an input we don't have).
-      if (!isManual && !serverIndices.has(t.index)) continue;
+      // Generated (script) tests are produced by the pushed script, so we DON'T upload
+      // them one-by-one — that's the slow part and Polygon regenerates them. We only
+      // edit a generated test when it carries per-test metadata that the script can't
+      // express (group/points/description/use-in-statements) and it already exists on
+      // Polygon (editing a not-yet-generated test would fail).
+      const hasMeta =
+        (ts.enableGroups && !!t.group && t.group.trim() !== "") ||
+        (pointsOn && t.points !== undefined) ||
+        (!!t.description && t.description.trim() !== "") ||
+        t.useInStatements === true;
+      if (!isManual && (!hasMeta || !serverByIndex.has(t.index))) {
+        report("Uploading tests", ++testsDone, totalTests);
+        return;
+      }
+      // Already identical on Polygon — nothing to upload.
+      if (unchanged(t, serverByIndex.get(t.index))) {
+        report("Uploading tests", ++testsDone, totalTests);
+        return;
+      }
       await problemSaveTest(
         creds,
         problemId,
@@ -440,7 +571,8 @@ export async function syncPush(
         },
         pin,
       );
-    }
+      report("Uploading tests", ++testsDone, totalTests);
+    });
   }
 
   // Group policies/feedback/dependencies, after tests exist. Groups are derived from
@@ -448,6 +580,9 @@ export async function syncPush(
   // drops it once empty), so we only push policies for groups still referenced here.
   // Script-generated groups may not exist until the package is built, so a failure is
   // tolerated rather than aborting the push.
+  if (content.testsets.some((ts) => ts.enableGroups && ts.groups.length > 0)) {
+    report("Updating test groups", 0, 0);
+  }
   for (const ts of content.testsets) {
     if (!ts.enableGroups) continue;
     const present = new Set(
@@ -475,7 +610,8 @@ export async function syncPush(
   }
 
   // Validator tests (input + expected VALID/INVALID verdict).
-  for (const vt of content.validatorTests) {
+  report("Uploading validator tests", 0, content.validatorTests.length);
+  await runPool(content.validatorTests, SYNC_CONCURRENCY, async (vt) => {
     await problemSaveValidatorTest(
       creds,
       problemId,
@@ -489,11 +625,16 @@ export async function syncPush(
       },
       pin,
     );
-    summary.validatorTests++;
-  }
+    report(
+      "Uploading validator tests",
+      ++summary.validatorTests,
+      content.validatorTests.length,
+    );
+  });
 
   // Checker tests (input/output/answer + expected checker verdict).
-  for (const ct of content.checkerTests) {
+  report("Uploading checker tests", 0, content.checkerTests.length);
+  await runPool(content.checkerTests, SYNC_CONCURRENCY, async (ct) => {
     await problemSaveCheckerTest(
       creds,
       problemId,
@@ -507,8 +648,8 @@ export async function syncPush(
       },
       pin,
     );
-    summary.checkerTests++;
-  }
+    report("Uploading checker tests", ++summary.checkerTests, content.checkerTests.length);
+  });
 
   return summary;
 }
