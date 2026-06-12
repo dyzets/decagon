@@ -52,7 +52,7 @@ jobs:
         run: npm run build
 
       - name: Package & publish to the GitHub Release
-        run: npx --no-install electron-builder --publish always ${{ runner.os == 'macOS' && '--mac --arch universal' || '' }}
+        run: npx --no-install electron-builder --publish always ${{ runner.os == 'macOS' && '--mac --universal' || '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Skip macOS code-signing (unsigned .dmg). Remove if you add signing certs.
