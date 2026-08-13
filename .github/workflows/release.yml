@@ -21,8 +21,10 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     env:
-      # Fixed cache dir so @electron/get reuses the downloaded binary across runs.
+      # Fixed cache dirs so @electron/get and electron-builder reuse downloaded
+      # binaries (Electron, appimage/nsis tools) across runs.
       ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +40,15 @@ jobs:
           key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json') }}
           restore-keys: ${{ runner.os }}-electron-
 
+      # electron-builder downloads packaging tools (appimage, nsis, …) on demand;
+      # those downloads occasionally EOF mid-transfer. Cache them across runs.
+      - name: Cache electron-builder tools
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/electron-builder
+          key: ${{ runner.os }}-electron-builder-${{ hashFiles('package-lock.json') }}
+          restore-keys: ${{ runner.os }}-electron-builder-
+
       # `npm ci` downloads the Electron binary in a postinstall step; that download
       # occasionally fails with a transient 504/timeout. Retry instead of failing the run.
       - name: Install dependencies
@@ -51,9 +62,16 @@ jobs:
       - name: Bundle main + preload + renderer
         run: npm run build
 
+      # Same transient-download problem as `npm ci`: electron-builder fetches its
+      # packaging tools from GitHub and can fail with an EOF. Retry the whole step.
       - name: Package & publish to the GitHub Release
-        run: npx --no-install electron-builder --publish always ${{ runner.os == 'macOS' && '--mac --universal' || '' }}
+        uses: nick-fields/retry@v3
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Skip macOS code-signing (unsigned .dmg). Remove if you add signing certs.
           CSC_IDENTITY_AUTO_DISCOVERY: false
+        with:
+          timeout_minutes: 30
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: npx --no-install electron-builder --publish always ${{ runner.os == 'macOS' && '--mac --universal' || '' }}
