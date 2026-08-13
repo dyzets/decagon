@@ -9,6 +9,9 @@ const bridge: PolygonBridge = {
   saveCredentials: (input) => ipcRenderer.invoke(IPC.credentialsSave, input),
   clearCredentials: () => ipcRenderer.invoke(IPC.credentialsClear),
 
+  getSettings: () => ipcRenderer.invoke(IPC.settingsGet),
+  saveSettings: (input) => ipcRenderer.invoke(IPC.settingsSave, input),
+
   problemInfo: (problemId, pin) => ipcRenderer.invoke(IPC.problemInfo, problemId, pin),
   problemMeta: (problemId, pin) => ipcRenderer.invoke(IPC.problemMeta, problemId, pin),
   problemSolutions: (problemId, pin) =>

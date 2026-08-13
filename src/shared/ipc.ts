@@ -28,6 +28,9 @@ export const IPC = {
   credentialsStatus: "credentials:status",
   credentialsSave: "credentials:save",
   credentialsClear: "credentials:clear",
+  // app preferences (userData/settings.json)
+  settingsGet: "settings:get",
+  settingsSave: "settings:save",
   // polygon API for a single problem (executed in main using stored credentials)
   problemInfo: "polygon:problem.info",
   problemSolutions: "polygon:problem.solutions",
@@ -281,6 +284,26 @@ export interface SaveCredentialsInput {
   apiSecret: string;
 }
 
+/** User-adjustable app preferences (persisted in userData/settings.json). */
+export interface AppSettings {
+  /**
+   * Max Polygon requests in flight during pull/push. Polygon rate-limits the API and
+   * doesn't publish the limit, so this is user-tunable: lower it when a push fails
+   * with "Too many requests", raise it for speed. 1 = fully sequential.
+   */
+  syncConcurrency: number;
+  /**
+   * Minimum delay (ms) between two Polygon requests, across all in-flight workers.
+   * 0 = no artificial spacing. Raise it if lowering the concurrency isn't enough.
+   */
+  requestIntervalMs: number;
+  /**
+   * How many times a request rejected as "too many requests" is retried with
+   * exponential backoff before the sync fails. 0 = fail immediately.
+   */
+  maxRetries: number;
+}
+
 /**
  * The typed API exposed on `window.polygon` in the renderer via contextBridge.
  * Every call is forwarded over IPC to the main process.
@@ -289,6 +312,11 @@ export interface PolygonBridge {
   getCredentialsStatus(): Promise<CredentialsStatus>;
   saveCredentials(input: SaveCredentialsInput): Promise<CredentialsStatus>;
   clearCredentials(): Promise<CredentialsStatus>;
+
+  /** Read the persisted app preferences. */
+  getSettings(): Promise<AppSettings>;
+  /** Persist (partial) app preferences; returns the stored, clamped result. */
+  saveSettings(input: Partial<AppSettings>): Promise<AppSettings>;
 
   problemInfo(problemId: number, pin?: string): Promise<ProblemInfo>;
   /** Resolve a problem's metadata (owner, name, accessType, revision, …). */

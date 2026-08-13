@@ -50,7 +50,9 @@ import {
   openProjectFolder,
 } from "./projects";
 import { readManifest } from "./manifest";
+import { loadSettings, saveSettings } from "./settings";
 import type {
+  AppSettings,
   ProjectCheckerTest,
   ProjectFileEntry,
   ProjectFileRef,
@@ -113,6 +115,12 @@ export function registerIpcHandlers(): void {
     clearCredentials();
     return status();
   });
+
+  // --- app settings ---
+  ipcMain.handle(IPC.settingsGet, () => loadSettings());
+  ipcMain.handle(IPC.settingsSave, (_e, input: Partial<AppSettings>) =>
+    saveSettings(input ?? {}),
+  );
 
   // --- read-only problem data (for the project Details view) ---
   ipcMain.handle(IPC.problemInfo, (_e, problemId: number, pin?: string) =>

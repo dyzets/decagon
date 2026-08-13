@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell } from "electron";
 import { join } from "node:path";
 import icon from "../../resources/icon.png?asset";
 import { registerIpcHandlers } from "./ipc";
+import { loadSettings } from "./settings";
 
 // electron-vite injects these env vars during dev to point at the dev server.
 const DEV_SERVER_URL = process.env["ELECTRON_RENDERER_URL"];
@@ -38,6 +39,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  loadSettings(); // also pushes the throttle/retry policy into the API client
   registerIpcHandlers();
   createWindow();
 

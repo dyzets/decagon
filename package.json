@@ -13,6 +13,7 @@
     "package": "electron-vite build && electron-builder",
     "selftest": "tsx src/core/sign.selftest.ts",
     "selftest:script": "tsx src/core/script.selftest.ts",
+    "selftest:ratelimit": "tsx src/core/ratelimit.selftest.ts",
     "cli": "tsx src/test-cli.ts"
   },
   "dependencies": {},

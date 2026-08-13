@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { CredentialsStatus } from "../shared/ipc";
+import type { AppSettings, CredentialsStatus } from "../shared/ipc";
 import { ProblemDetail } from "./ProblemDetail";
 import { ProjectsView } from "./ProjectsView";
 import { useToast } from "./Toast";
@@ -28,6 +28,7 @@ function useTheme(): [Theme, () => void] {
 export function App(): JSX.Element {
   const [status, setStatus] = useState<CredentialsStatus | null>(null);
   const [theme, toggleTheme] = useTheme();
+  const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
     void window.polygon.getCredentialsStatus().then(setStatus);
@@ -40,10 +41,16 @@ export function App(): JSX.Element {
           <img className="brand-logo" src={logo} alt="" />
           <h1>Decagon</h1>
         </div>
-        <button className="link" onClick={toggleTheme}>
-          {theme === "dark" ? "☀ Light mode" : "🌙 Dark mode"}
-        </button>
+        <div className="actions">
+          <button className="link" onClick={() => setShowSettings((s) => !s)}>
+            ⚙ Settings
+          </button>
+          <button className="link" onClick={toggleTheme}>
+            {theme === "dark" ? "☀ Light mode" : "🌙 Dark mode"}
+          </button>
+        </div>
       </div>
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
       {!status ? (
         <p className="loading">Loading…</p>
       ) : status.configured ? (
@@ -103,6 +110,121 @@ function Workspace({
           }
         />
       )}
+    </div>
+  );
+}
+
+// Mirrors the clamp in main's settings.ts (main is authoritative and re-clamps).
+const MIN_CONCURRENCY = 1;
+const MAX_CONCURRENCY = 16;
+const MAX_REQUEST_INTERVAL_MS = 5000;
+const MAX_RETRIES = 10;
+
+/** App preferences. Currently just how hard pull/push hits the Polygon API. */
+function SettingsPanel({ onClose }: { onClose: () => void }): JSX.Element {
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const toast = useToast();
+
+  useEffect(() => {
+    void window.polygon.getSettings().then(setSettings);
+  }, []);
+
+  async function save(): Promise<void> {
+    if (!settings) return;
+    setSaving(true);
+    try {
+      setSettings(await window.polygon.saveSettings(settings));
+      toast.success("Settings saved.");
+      onClose();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!settings) return <p className="loading">Loading settings…</p>;
+
+  return (
+    <div className="card">
+      <h2>Settings</h2>
+      <label>
+        Parallel Polygon requests
+        <div className="actions">
+          <input
+            type="range"
+            min={MIN_CONCURRENCY}
+            max={MAX_CONCURRENCY}
+            step={1}
+            value={settings.syncConcurrency}
+            onChange={(e) =>
+              setSettings({ ...settings, syncConcurrency: Number(e.target.value) })
+            }
+          />
+          <input
+            type="number"
+            min={MIN_CONCURRENCY}
+            max={MAX_CONCURRENCY}
+            step={1}
+            style={{ width: "5em" }}
+            value={settings.syncConcurrency}
+            onChange={(e) =>
+              setSettings({ ...settings, syncConcurrency: Number(e.target.value) })
+            }
+          />
+        </div>
+      </label>
+      <p className="muted">
+        How many Polygon API calls Pull and Push may have in flight at once
+        (1–{MAX_CONCURRENCY}). Polygon rate-limits its API without publishing the
+        limit: if a push fails with <code>Too many requests</code>, lower this (try 2,
+        or 1 for fully sequential). Raise it for faster syncs. Applies to the next
+        pull/push — no restart needed.
+      </p>
+      <label className="field">
+        Minimum delay between requests (ms)
+        <input
+          type="number"
+          min={0}
+          max={MAX_REQUEST_INTERVAL_MS}
+          step={50}
+          value={settings.requestIntervalMs}
+          onChange={(e) =>
+            setSettings({ ...settings, requestIntervalMs: Number(e.target.value) })
+          }
+        />
+      </label>
+      <p className="muted">
+        Spaces out every Polygon request, across all parallel workers (0 = no extra
+        spacing, max {MAX_REQUEST_INTERVAL_MS}). Use this when lowering the concurrency
+        alone isn&apos;t enough — e.g. 200 ms caps the app at ~5 requests/second.
+      </p>
+      <label className="field">
+        Retries on &quot;Too many requests&quot;
+        <input
+          type="number"
+          min={0}
+          max={MAX_RETRIES}
+          step={1}
+          value={settings.maxRetries}
+          onChange={(e) =>
+            setSettings({ ...settings, maxRetries: Number(e.target.value) })
+          }
+        />
+      </label>
+      <p className="muted">
+        A throttled request is retried automatically with exponential backoff (1s, 2s,
+        4s, …) instead of failing the whole sync. 0 disables retrying.
+      </p>
+      <div className="actions">
+        <button onClick={save} disabled={saving}>
+          {saving ? "Saving…" : "Save settings"}
+        </button>
+        <button className="link" onClick={onClose}>
+          Close
+        </button>
+      </div>
     </div>
   );
 }

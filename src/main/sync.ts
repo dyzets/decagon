@@ -55,6 +55,7 @@ import {
   readProjectContent,
   writeProjectContent,
 } from "./projectContent";
+import { loadSettings } from "./settings";
 
 /** Callback used to report pull/push progress to the caller (forwarded to the UI). */
 export type ProgressReporter = (progress: SyncProgress) => void;
@@ -62,9 +63,14 @@ export type ProgressReporter = (progress: SyncProgress) => void;
 /**
  * Max in-flight Polygon requests during pull/push. Independent operations (files,
  * solutions, tests, …) run concurrently up to this limit, which cuts sync time
- * roughly N-fold while staying well within Polygon's tolerance.
+ * roughly N-fold. Polygon rate-limits the API without publishing the limit, so this
+ * is a user setting (Settings → "Parallel Polygon requests"): lower it when a push
+ * fails with "Too many requests". Read per pool so a change applies to the next sync
+ * without a restart.
  */
-const SYNC_CONCURRENCY = 8;
+function syncConcurrency(): number {
+  return loadSettings().syncConcurrency;
+}
 
 /** Run an async task over each item with bounded concurrency (fail-fast). */
 async function runPool<T>(
@@ -155,7 +161,7 @@ export async function syncPull(
   const resourceEntries: ProjectStatementResource[] = [];
   let resDone = 0;
   report("Downloading statement resources", 0, stmtResources.length);
-  await runPool(stmtResources, SYNC_CONCURRENCY, async (r) => {
+  await runPool(stmtResources, syncConcurrency(), async (r) => {
     const bytes = await problemViewStatementResource(creds, problemId, r.name, pin);
     const buf = Buffer.from(bytes);
     const binary = isBinary(buf);
@@ -176,7 +182,7 @@ export async function syncPull(
   ];
   let fileDone = 0;
   report("Downloading files", 0, fileTargets.length);
-  await runPool(fileTargets, SYNC_CONCURRENCY, async ({ type, f }) => {
+  await runPool(fileTargets, syncConcurrency(), async ({ type, f }) => {
     const content = await problemViewFile(creds, problemId, type, f.name, pin);
     fileEntries.push({
       name: f.name,
@@ -195,7 +201,7 @@ export async function syncPull(
   const solutionEntries: ProjectContent["solutions"] = [];
   let solDone = 0;
   report("Downloading solutions", 0, solutions.length);
-  await runPool(solutions, SYNC_CONCURRENCY, async (s) => {
+  await runPool(solutions, syncConcurrency(), async (s) => {
     const content = await problemViewSolution(creds, problemId, s.name, pin);
     solutionEntries.push({
       name: s.name,
@@ -370,7 +376,7 @@ export async function syncPush(
   // Files are mutually independent, so push them concurrently.
   const filesToPush = content.files.filter((f) => !f.binary && f.push !== false);
   report("Uploading files", 0, filesToPush.length);
-  await runPool(filesToPush, SYNC_CONCURRENCY, async (f) => {
+  await runPool(filesToPush, syncConcurrency(), async (f) => {
     // Resource files carry grader advanced properties; send them authoritatively
     // (set when present, cleared with forTypes="" when absent). Non-resource files
     // omit them entirely so Polygon leaves nothing of the sort.
@@ -423,7 +429,7 @@ export async function syncPush(
 
   const solutionsToPush = content.solutions.filter((s) => s.push !== false);
   report("Uploading solutions", 0, solutionsToPush.length);
-  await runPool(solutionsToPush, SYNC_CONCURRENCY, async (s) => {
+  await runPool(solutionsToPush, syncConcurrency(), async (s) => {
     await problemSaveSolution(
       creds,
       problemId,
@@ -440,7 +446,7 @@ export async function syncPush(
   });
 
   report("Uploading statements", 0, content.statements.length);
-  await runPool(content.statements, SYNC_CONCURRENCY, async (st) => {
+  await runPool(content.statements, syncConcurrency(), async (st) => {
     const fields: Record<string, string> = {};
     for (const field of Object.keys(STATEMENT_FILES) as (keyof typeof STATEMENT_FILES)[]) {
       const value = st[field];
@@ -458,7 +464,7 @@ export async function syncPush(
   // uploads text, and pull still fetches the binary ones).
   const resourcesToPush = content.statementResources.filter((r) => !r.binary);
   report("Uploading statement resources", 0, resourcesToPush.length);
-  await runPool(resourcesToPush, SYNC_CONCURRENCY, async (r) => {
+  await runPool(resourcesToPush, syncConcurrency(), async (r) => {
     await problemSaveStatementResource(
       creds,
       problemId,
@@ -529,7 +535,7 @@ export async function syncPush(
     };
 
     // Tests target distinct indices, so push them concurrently.
-    await runPool(ts.tests, SYNC_CONCURRENCY, async (t) => {
+    await runPool(ts.tests, syncConcurrency(), async (t) => {
       const isManual = t.manual && t.input !== undefined;
       // Generated (script) tests are produced by the pushed script, so we DON'T upload
       // them one-by-one — that's the slow part and Polygon regenerates them. We only
@@ -611,7 +617,7 @@ export async function syncPush(
 
   // Validator tests (input + expected VALID/INVALID verdict).
   report("Uploading validator tests", 0, content.validatorTests.length);
-  await runPool(content.validatorTests, SYNC_CONCURRENCY, async (vt) => {
+  await runPool(content.validatorTests, syncConcurrency(), async (vt) => {
     await problemSaveValidatorTest(
       creds,
       problemId,
@@ -634,7 +640,7 @@ export async function syncPush(
 
   // Checker tests (input/output/answer + expected checker verdict).
   report("Uploading checker tests", 0, content.checkerTests.length);
-  await runPool(content.checkerTests, SYNC_CONCURRENCY, async (ct) => {
+  await runPool(content.checkerTests, syncConcurrency(), async (ct) => {
     await problemSaveCheckerTest(
       creds,
       problemId,
